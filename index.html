@@ -45,7 +45,7 @@
 
     <div class="bridgeStatus">
       <div id="bridgeText" class="bridgeText idle">BRIDGE: idle</div>
-      <div class="muted" id="bridgeHint">Based on WAN/LAN traffic & NAT counters</div>
+      <div class="muted" id="bridgeHint">Based on WAN/LAN traffic in last interval</div>
     </div>
   </div>
 
@@ -57,7 +57,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
 <script>
-const BLOB_URL = "https://storagetemperaturedata.blob.core.windows.net/telemetry/temps.json";
+const BLOB_URL = "https://YOUR_STORAGE_ACCOUNT.blob.core.windows.net/telemetry/temps.json";
 const HOT_THRESHOLD = 70;
 let useLocalTZ = true;
 let charts = {};
@@ -73,22 +73,38 @@ async function fetchJsonNoCache(url){
 function toPoints(arr, key){return arr.map(d=>({x:new Date(d.ts), y:Number(d[key])})).filter(p=>Number.isFinite(p.y));}
 function mbpsFromBps(bps){return (bps==null)?null:(bps/1_000_000);}
 
-/* --------- time axis: grid every 10 min, labels only at :00 --------- */
-function xTimeScale() {
+/* --- snap domains so grid lands on exact :00/:10/:20... boundaries --- */
+function floorTo10m(ms, useLocal) {
+  const d = new Date(ms);
+  let Y=d.getFullYear(), M=d.getMonth(), D=d.getDate(), h=useLocal?d.getHours():d.getUTCHours();
+  let m = useLocal?d.getMinutes():d.getUTCMinutes();
+  const snap = Math.floor(m/10)*10;
+  return (useLocal ? new Date(Y,M,D,h,snap,0,0) : new Date(Date.UTC(Y,M,D,h,snap,0,0))).getTime();
+}
+function ceilTo10m(ms, useLocal) { const f=floorTo10m(ms,useLocal); return (f===ms)?ms:f+10*60*1000; }
+function computeDomain10m(points, useLocal) {
+  if (!points.length) return {};
+  const t0=points[0].x.getTime(), t1=points[points.length-1].x.getTime();
+  return {min: floorTo10m(t0,useLocal), max: ceilTo10m(t1,useLocal)};
+}
+
+/* --------- time axis: grid every 10 min, labels only at the hour --------- */
+function xTimeScale(min=null, max=null) {
   return {
     type:'time',
     distribution:'linear',
     bounds:'ticks',
+    min, max,
     time:{ unit:'minute', stepSize:10, round:'minute' },
     ticks:{
-      autoSkip:true, autoSkipPadding:12, maxRotation:0, minRotation:0, color:'#e2e8f0',
+      autoSkip:false, maxRotation:0, minRotation:0, color:'#e2e8f0',
       callback:(v)=>{
         const d=new Date(v);
-        const minutes = useLocalTZ ? d.getMinutes() : new Date(d.toISOString()).getUTCMinutes();
-        if(minutes !== 0) return ''; // label only at :00
+        const mins = useLocalTZ ? d.getMinutes() : d.getUTCMinutes();
+        if (mins !== 0) return '';
         return useLocalTZ
-          ? d.toLocaleTimeString([], {hour:'numeric'})   // "8 PM"
-          : d.toISOString().substring(11,13)+":00 UTC";  // "20:00 UTC"
+          ? d.toLocaleTimeString([], {hour:'numeric'})
+          : d.toISOString().substring(11,13)+":00 UTC";
       }
     },
     grid:{ color:'rgba(148,163,184,.2)' }
@@ -101,7 +117,7 @@ function tooltipTitle(ctx){
   return useLocalTZ ? fmtLocal(d) : fmtUTC(d);
 }
 
-/* --------- temp threshold shading + small label --------- */
+/* --------- temp threshold shading + tiny label --------- */
 const thresholdFillPlugin = {
   id: 'thresholdFill',
   beforeDraw(chart) {
@@ -109,30 +125,12 @@ const thresholdFillPlugin = {
     if (!yS || !area) return;
     const y = yS.getPixelForValue(HOT_THRESHOLD);
     const ctx = chart.ctx;
-
-    // Shaded region above threshold
-    ctx.save();
-    ctx.globalAlpha = 0.22;
-    ctx.fillStyle = '#ef4444';
-    ctx.fillRect(area.left, area.top, area.right - area.left, Math.max(0, y - area.top));
-    ctx.restore();
-
-    // Dashed line
-    ctx.save();
-    ctx.strokeStyle = '#ff6b6b';
-    ctx.lineWidth = 1.25;
-    ctx.setLineDash([6,4]);
-    ctx.beginPath(); ctx.moveTo(area.left, y); ctx.lineTo(area.right, y); ctx.stroke();
-    ctx.restore();
-
-    // Tiny label
-    ctx.save();
-    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
-    ctx.fillStyle = '#ffd7d7';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(`${HOT_THRESHOLD} °C`, area.right - 6, y - 4);
-    ctx.restore();
+    ctx.save(); ctx.globalAlpha=0.22; ctx.fillStyle='#ef4444';
+    ctx.fillRect(area.left,area.top,area.right-area.left,Math.max(0,y-area.top)); ctx.restore();
+    ctx.save(); ctx.strokeStyle='#ff6b6b'; ctx.lineWidth=1.25; ctx.setLineDash([6,4]);
+    ctx.beginPath(); ctx.moveTo(area.left,y); ctx.lineTo(area.right,y); ctx.stroke(); ctx.restore();
+    ctx.save(); ctx.font='12px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#ffd7d7';
+    ctx.textAlign='right'; ctx.textBaseline='bottom'; ctx.fillText(`${HOT_THRESHOLD} °C`, area.right-6, y-4); ctx.restore();
   }
 };
 
@@ -147,10 +145,7 @@ function makeChart(ctx, datasets, plugins=[]) {
         legend:{display:true, labels:{color:'#e2e8f0'}},
         tooltip:{mode:'index', intersect:false, callbacks:{ title: tooltipTitle }}
       },
-      scales:{
-        x: xTimeScale(),
-        y:{ ticks:{color:'#e2e8f0'}, grid:{color:'rgba(148,163,184,.2)'} }
-      }
+      scales:{ x: xTimeScale(), y:{ ticks:{color:'#e2e8f0'}, grid:{color:'rgba(148,163,184,.2)'} } }
     },
     plugins
   });
@@ -174,12 +169,11 @@ function render(j){
   document.getElementById('tz-label').textContent = useLocalTZ ? 'Local' : 'UTC';
   document.getElementById('upd').textContent = upd ? (useLocalTZ ? fmtLocal(upd) : fmtUTC(upd)) : '—';
 
-  // Bridge info (from new fields)
+  // Bridge info
   const wan = last?.wan_if ?? '—';
   const lan = last?.lan_if ?? '—';
   document.getElementById('wanBadge').textContent = 'wan: ' + wan;
   document.getElementById('lanBadge').textContent = 'lan: ' + lan;
-
   const bridge = !!last?.bridge_active;
   const bt = document.getElementById('bridgeText');
   bt.textContent = 'BRIDGE: ' + (bridge ? 'ACTIVE' : 'idle');
@@ -189,9 +183,14 @@ function render(j){
   const ptsTemp   = toPoints(data, 'temp_c');
   const ptsCPU    = toPoints(data, 'cpu_percent');
   const ptsRAM    = toPoints(data, 'ram_percent');
-
   const ptsUpMbps = toPoints(data, 'wan_tx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
   const ptsDnMbps = toPoints(data, 'wan_rx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
+
+  // Domains snapped to 10-min boundaries
+  const domTemp = computeDomain10m(ptsTemp, useLocalTZ);
+  const domCpu  = computeDomain10m(ptsCPU.length?ptsCPU:ptsRAM, useLocalTZ);
+  const baseNet = ptsUpMbps.length?ptsUpMbps:ptsDnMbps;
+  const domNet  = computeDomain10m(baseNet, useLocalTZ);
 
   // Temperature
   if(!charts.temp){
@@ -200,12 +199,10 @@ function render(j){
     ], [thresholdFillPlugin]);
     charts.temp.options.scales.y.suggestedMin = 20;
     charts.temp.options.scales.y.suggestedMax = 80;
-    charts.temp.update();
-  } else {
-    charts.temp.data.datasets[0].data = ptsTemp;
-    charts.temp.options.scales.x = xTimeScale();
-    charts.temp.update();
   }
+  charts.temp.data.datasets[0].data = ptsTemp;
+  charts.temp.options.scales.x = xTimeScale(domTemp.min, domTemp.max);
+  charts.temp.update();
 
   // CPU & RAM
   if(!charts.cpu){
@@ -215,13 +212,11 @@ function render(j){
     ]);
     charts.cpu.options.scales.y.suggestedMin = 0;
     charts.cpu.options.scales.y.suggestedMax = 100;
-    charts.cpu.update();
-  } else {
-    charts.cpu.data.datasets[0].data = ptsCPU;
-    charts.cpu.data.datasets[1].data = ptsRAM;
-    charts.cpu.options.scales.x = xTimeScale();
-    charts.cpu.update();
   }
+  charts.cpu.data.datasets[0].data = ptsCPU;
+  charts.cpu.data.datasets[1].data = ptsRAM;
+  charts.cpu.options.scales.x = xTimeScale(domCpu.min, domCpu.max);
+  charts.cpu.update();
 
   // Network (WAN Mb/s)
   if(!charts.net){
@@ -229,13 +224,11 @@ function render(j){
       {label:'Upload (Mb/s)',   data: ptsUpMbps, borderColor:'#34d399', pointRadius:0, tension:.2},
       {label:'Download (Mb/s)', data: ptsDnMbps, borderColor:'#f472b6', pointRadius:0, tension:.2}
     ]);
-    charts.net.update();
-  } else {
-    charts.net.data.datasets[0].data = ptsUpMbps;
-    charts.net.data.datasets[1].data = ptsDnMbps;
-    charts.net.options.scales.x = xTimeScale();
-    charts.net.update();
   }
+  charts.net.data.datasets[0].data = ptsUpMbps;
+  charts.net.data.datasets[1].data = ptsDnMbps;
+  charts.net.options.scales.x = xTimeScale(domNet.min, domNet.max);
+  charts.net.update();
 }
 
 /* ---------------- boot ---------------- */
