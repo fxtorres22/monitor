@@ -19,10 +19,10 @@
   canvas{width:100%;height:360px;}
   .controls{display:flex;gap:16px;align-items:center;margin:8px 0;}
   .badge{border:1px solid var(--ring);border-radius:999px;padding:4px 10px;font-size:.9rem;color:var(--muted);margin-left:8px}
-  .bridgeStatus{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;}
-  .bridgeText{font-weight:800;font-size:1.6rem;letter-spacing:.02em}
-  .bridgeText.active{color:#ff6b6b;}      /* vivid red */
-  .bridgeText.idle{color:#22c55e;}        /* green */
+  .bridgeStatus{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between}
+  .bridgeText{font-weight:900;font-size:1.6rem;letter-spacing:.02em}
+  .bridgeText.active{color:#ff6b6b;}  /* vivid red */
+  .bridgeText.idle{color:#22c55e;}    /* green */
   hr{border:none;border-top:1px solid var(--ring);margin:12px 0;}
 </style>
 </head>
@@ -39,13 +39,13 @@
     <div class="controls">
       <label><input type="checkbox" id="tzToggle"> Show times in UTC</label>
       <span class="muted">Auto-refresh 60 s</span>
-      <span id="uplinkBadge" class="badge">uplink: —</span>
-      <span id="defaultBadge" class="badge">default: —</span>
+      <span id="wanBadge" class="badge">wan: —</span>
+      <span id="lanBadge" class="badge">lan: —</span>
     </div>
 
-    <!-- Prominent Bridge Status -->
     <div class="bridgeStatus">
       <div id="bridgeText" class="bridgeText idle">BRIDGE: idle</div>
+      <div class="muted" id="bridgeHint">Based on WAN/LAN traffic & NAT counters</div>
     </div>
   </div>
 
@@ -73,26 +73,22 @@ async function fetchJsonNoCache(url){
 function toPoints(arr, key){return arr.map(d=>({x:new Date(d.ts), y:Number(d[key])})).filter(p=>Number.isFinite(p.y));}
 function mbpsFromBps(bps){return (bps==null)?null:(bps/1_000_000);}
 
-/* --------- time axis with clean 10-min ticks/labels --------- */
+/* --------- time axis: grid every 10 min, labels only at :00 --------- */
 function xTimeScale() {
   return {
     type:'time',
     distribution:'linear',
     bounds:'ticks',
-    time:{ unit:'minute', stepSize:10, round:'minute' }, // tick/grid every 10 min
+    time:{ unit:'minute', stepSize:10, round:'minute' },
     ticks:{
-      autoSkip:true,
-      autoSkipPadding:8,
-      maxRotation:0,
-      minRotation:0,
-      color:'#e2e8f0',
-      callback:(v)=>{                       // label ONLY on exact 10-minute boundaries
+      autoSkip:true, autoSkipPadding:12, maxRotation:0, minRotation:0, color:'#e2e8f0',
+      callback:(v)=>{
         const d=new Date(v);
-        const m= useLocalTZ ? d.getMinutes() : new Date(d.toISOString()).getUTCMinutes();
-        if(m % 10 !== 0) return '';
+        const minutes = useLocalTZ ? d.getMinutes() : new Date(d.toISOString()).getUTCMinutes();
+        if(minutes !== 0) return ''; // label only at :00
         return useLocalTZ
-          ? d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
-          : d.toISOString().substring(11,16)+' UTC';
+          ? d.toLocaleTimeString([], {hour:'numeric'})   // "8 PM"
+          : d.toISOString().substring(11,13)+":00 UTC";  // "20:00 UTC"
       }
     },
     grid:{ color:'rgba(148,163,184,.2)' }
@@ -105,7 +101,7 @@ function tooltipTitle(ctx){
   return useLocalTZ ? fmtLocal(d) : fmtUTC(d);
 }
 
-/* --------- threshold shading + small label on temp chart --------- */
+/* --------- temp threshold shading + small label --------- */
 const thresholdFillPlugin = {
   id: 'thresholdFill',
   beforeDraw(chart) {
@@ -129,7 +125,7 @@ const thresholdFillPlugin = {
     ctx.beginPath(); ctx.moveTo(area.left, y); ctx.lineTo(area.right, y); ctx.stroke();
     ctx.restore();
 
-    // Tiny annotation text at the right edge
+    // Tiny label
     ctx.save();
     ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
     ctx.fillStyle = '#ffd7d7';
@@ -178,13 +174,13 @@ function render(j){
   document.getElementById('tz-label').textContent = useLocalTZ ? 'Local' : 'UTC';
   document.getElementById('upd').textContent = upd ? (useLocalTZ ? fmtLocal(upd) : fmtUTC(upd)) : '—';
 
-  // Bridge info
-  const uplink = last?.uplink_if ?? '—';
-  const defif  = last?.default_if ?? '—';
-  const bridge = !!last?.bridge_active;
-  document.getElementById('uplinkBadge').textContent  = 'uplink: ' + uplink;
-  document.getElementById('defaultBadge').textContent = 'default: ' + defif;
+  // Bridge info (from new fields)
+  const wan = last?.wan_if ?? '—';
+  const lan = last?.lan_if ?? '—';
+  document.getElementById('wanBadge').textContent = 'wan: ' + wan;
+  document.getElementById('lanBadge').textContent = 'lan: ' + lan;
 
+  const bridge = !!last?.bridge_active;
   const bt = document.getElementById('bridgeText');
   bt.textContent = 'BRIDGE: ' + (bridge ? 'ACTIVE' : 'idle');
   bt.className = 'bridgeText ' + (bridge ? 'active' : 'idle');
@@ -193,10 +189,11 @@ function render(j){
   const ptsTemp   = toPoints(data, 'temp_c');
   const ptsCPU    = toPoints(data, 'cpu_percent');
   const ptsRAM    = toPoints(data, 'ram_percent');
-  const ptsUpMbps = toPoints(data, 'net_tx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
-  const ptsDnMbps = toPoints(data, 'net_rx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
 
-  // Chart: Temperature
+  const ptsUpMbps = toPoints(data, 'wan_tx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
+  const ptsDnMbps = toPoints(data, 'wan_rx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
+
+  // Temperature
   if(!charts.temp){
     charts.temp = makeChart(document.getElementById('chartTemp').getContext('2d'), [
       {label:'Temperature (°C)', data: ptsTemp, borderColor:'#60a5fa', pointRadius:0, tension:.2}
@@ -206,11 +203,11 @@ function render(j){
     charts.temp.update();
   } else {
     charts.temp.data.datasets[0].data = ptsTemp;
-    charts.temp.options.scales.x = xTimeScale(); // re-apply axis config (timezone)
+    charts.temp.options.scales.x = xTimeScale();
     charts.temp.update();
   }
 
-  // Chart: CPU & RAM
+  // CPU & RAM
   if(!charts.cpu){
     charts.cpu = makeChart(document.getElementById('chartCpuRam').getContext('2d'), [
       {label:'CPU %', data: ptsCPU, borderColor:'#93c5fd', pointRadius:0, tension:.2},
@@ -226,7 +223,7 @@ function render(j){
     charts.cpu.update();
   }
 
-  // Chart: Network (Mb/s)
+  // Network (WAN Mb/s)
   if(!charts.net){
     charts.net = makeChart(document.getElementById('chartNet').getContext('2d'), [
       {label:'Upload (Mb/s)',   data: ptsUpMbps, borderColor:'#34d399', pointRadius:0, tension:.2},
