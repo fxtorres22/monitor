@@ -3,117 +3,190 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Raspberry Pi Temperature</title>
-
+<title>Raspberry Pi Telemetry</title>
 <style>
-  :root {
-    --bg:#0f172a;           /* dark navy background  */
-    --card:#1e293b;         /* slightly lighter panel */
-    --ink:#f9fafb;          /* main text */
-    --muted:#94a3b8;        /* secondary text */
-    --ring:#334155;         /* borders */
-    --ok:#22c55e;
-    --hot:#f87171;
-  }
-  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--ink);
-            font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
-  .card{max-width:980px;margin:2rem auto;padding:1rem 1.25rem;background:var(--card);
-        border:1px solid var(--ring);border-radius:14px;box-shadow:0 4px 14px rgba(0,0,0,.3);}
+  :root{--bg:#0f172a;--card:#1e293b;--ink:#f9fafb;--muted:#94a3b8;--ring:#334155;
+        --ok:#22c55e;--hot:#f87171;--accent:#60a5fa;}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
+  .wrap{max-width:1080px;margin:24px auto;padding:0 12px;}
+  .card{background:var(--card);border:1px solid var(--ring);border-radius:14px;
+    box-shadow:0 4px 14px rgba(0,0,0,.3);padding:16px 20px;margin-bottom:16px;}
   .row{display:flex;gap:24px;flex-wrap:wrap;align-items:baseline;}
-  .stat{font-size:2.4rem;font-weight:700;}
+  .stat{font-size:2.2rem;font-weight:700;}
   .muted{color:var(--muted);font-size:.95rem;}
   #cur.stat.hot{color:var(--hot);}#cur.stat.ok{color:var(--ok);}
-  canvas{width:100%;max-width:940px;height:380px;}
-  .controls{display:flex;gap:16px;align-items:center;margin:8px 0 0;}
-  label{user-select:none;}
-  .small{font-size:.9rem;color:var(--muted);}
+  canvas{width:100%;height:360px;}
+  .controls{display:flex;gap:16px;align-items:center;margin:8px 0;}
+  .badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .badge{border:1px solid var(--ring);border-radius:999px;padding:4px 10px;font-size:.9rem;color:var(--muted);}
+  .badge.ok{color:#22c55e;border-color:#14532d;background:#052e16;}
+  .badge.warn{color:#fda4af;border-color:#7f1d1d;background:#450a0a;}
+  hr{border:none;border-top:1px solid var(--ring);margin:12px 0;}
 </style>
 </head>
 <body>
-<div class="card">
-  <div class="row">
-    <div><div class="muted">Host</div><div id="host" class="stat">—</div></div>
-    <div><div class="muted">Current Temp (°C)</div><div id="cur" class="stat">—</div></div>
-    <div><div class="muted">Updated (<span id="tz-label">Local</span>)</div>
-         <div id="upd" class="stat" style="font-size:1.25rem;">—</div></div>
+<div class="wrap">
+  <div class="card">
+    <div class="row">
+      <div><div class="muted">Host</div><div id="host" class="stat">—</div></div>
+      <div><div class="muted">Temp (°C)</div><div id="cur" class="stat">—</div></div>
+      <div><div class="muted">Updated (<span id="tz-label">Local</span>)</div>
+           <div id="upd" class="stat" style="font-size:1.1rem;">—</div></div>
+    </div>
+    <div class="controls">
+      <label><input type="checkbox" id="tzToggle"> Show times in UTC</label>
+      <span class="muted">Auto-refresh 60 s</span>
+    </div>
+    <div class="badges">
+      <div id="uplinkBadge" class="badge">uplink: —</div>
+      <div id="defaultBadge" class="badge">default: —</div>
+      <div id="bridgeBadge" class="badge">bridge: —</div>
+    </div>
   </div>
 
-  <div class="controls">
-    <label><input type="checkbox" id="tzToggle"> Show times in UTC</label>
-    <span class="small">Auto-refreshes every 60 s</span>
-  </div>
-
-  <hr/>
-  <canvas id="chart"></canvas>
+  <div class="card"><canvas id="chartTemp"></canvas></div>
+  <div class="card"><canvas id="chartCpuRam"></canvas></div>
+  <div class="card"><canvas id="chartNet"></canvas></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
 <script>
-const BLOB_URL = "https://storagetemperaturedata.blob.core.windows.net/telemetry/temps.json";
+const BLOB_URL = "https://YOUR_STORAGE_ACCOUNT.blob.core.windows.net/telemetry/temps.json";
 const HOT_THRESHOLD = 70;
-let chart;
-let useLocalTZ = true; // default → local time
+let useLocalTZ = true;
+let charts = {};
 
 function fmtUTC(d){return d.toISOString().replace('T',' ').slice(0,19)+'Z';}
 function fmtLocal(d){return d.toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',
                                                   hour:'2-digit',minute:'2-digit',second:'2-digit'});}
-async function fetchJsonNoCache(url){
-  const bust='_ts='+Date.now();const sep=url.includes('?')?'&':'?';
-  const r=await fetch(url+sep+bust,{cache:'no-store'});
-  if(!r.ok)throw new Error('Fetch failed');return await r.json();
-}
-const thresholdFillPlugin={
-  id:'thresholdFill',
-  beforeDraw(chart){const yS=chart.scales.y, area=chart.chartArea;if(!yS)return;
-    const y=yS.getPixelForValue(HOT_THRESHOLD), ctx=chart.ctx;
-    ctx.save();ctx.globalAlpha=.15;ctx.fillStyle='#ef4444';
-    ctx.fillRect(area.left,area.top,area.right-area.left,Math.max(0,y-area.top));ctx.restore();
-    ctx.save();ctx.strokeStyle='#ef4444';ctx.setLineDash([4,3]);
-    ctx.beginPath();ctx.moveTo(area.left,y);ctx.lineTo(area.right,y);ctx.stroke();ctx.restore();}
-};
-function buildDataset(data){return data.map(d=>({x:new Date(d.ts),y:+d.temp_c}));}
-function tooltipTitle(ctx){const d=new Date(ctx[0].parsed.x);
-  return useLocalTZ?fmtLocal(d):fmtUTC(d);}
-function tickFormatter(value){const d=new Date(value);
-  return useLocalTZ?d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):
-                    d.toISOString().substring(11,16)+' UTC';}
-function render(j){
-  const host=j.host??'raspberrypi', data=Array.isArray(j.data)?j.data:[];
-  document.getElementById('host').textContent=host;
-  const cur=data.length?+data.at(-1).temp_c:NaN;
-  const curEl=document.getElementById('cur');
-  curEl.textContent=isFinite(cur)?cur.toFixed(1):'—';
-  curEl.className='stat '+(isFinite(cur)?(cur>=HOT_THRESHOLD?'hot stat':'ok stat'):'stat');
-  const updated=data.length?new Date(data.at(-1).ts):null;
-  document.getElementById('tz-label').textContent=useLocalTZ?'Local':'UTC';
-  document.getElementById('upd').textContent=updated?(useLocalTZ?fmtLocal(updated):fmtUTC(updated)):'—';
+async function fetchJsonNoCache(url){const r=await fetch(url+(url.includes('?')?'&':'?')+'_ts='+Date.now(),{cache:'no-store'});
+  if(!r.ok)throw new Error('fetch '+r.status);return await r.json();}
 
-  const points=buildDataset(data);
-  if(!chart){
-    chart=new Chart(document.getElementById('chart').getContext('2d'),{
-      type:'line',
-      data:{datasets:[{label:'Temperature (°C)',data:points,tension:.2,pointRadius:0,borderColor:'#60a5fa'}]},
-      options:{
-        parsing:true,animation:false,normalized:true,
-        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{title:tooltipTitle}}},
-        scales:{
-          x:{type:'time',time:{unit:'minute',stepSize:10}, // 10-min grid
-             ticks:{color:'#e2e8f0',callback:tickFormatter},grid:{color:'rgba(148,163,184,.2)'}},
-          y:{title:{display:true,text:'°C'},ticks:{color:'#e2e8f0'},
-             grid:{color:'rgba(148,163,184,.2)'},suggestedMin:20,suggestedMax:80}
-        }
-      },
-      plugins:[thresholdFillPlugin]
-    });
-  }else{chart.data.datasets[0].data=points;chart.update();}
+const thresholdFillPlugin={id:'thresholdFill',beforeDraw(c){const y=c.scales.y, a=c.chartArea;if(!y||!a)return;
+  const yy=y.getPixelForValue(HOT_THRESHOLD),x=c.ctx;
+  x.save();x.globalAlpha=.15;x.fillStyle='#ef4444';x.fillRect(a.left,a.top,a.right-a.left,Math.max(0,yy-a.top));x.restore();
+  x.save();x.strokeStyle='#ef4444';x.setLineDash([4,3]);x.beginPath();x.moveTo(a.left,yy);x.lineTo(a.right,yy);x.stroke();x.restore();}};
+
+function toPoints(arr, key){return arr.map(d=>({x:new Date(d.ts), y:Number(d[key])})).filter(p=>Number.isFinite(p.y));}
+function mbpsFromBps(bps){return (bps==null)?null:(bps/1_000_000);}
+
+function xTimeScale() {
+  return {
+    type:'time',
+    time:{ unit:'minute', stepSize:10 }, // 10-minute grid
+    ticks:{ color:'#e2e8f0',
+      callback:(v)=>{const d=new Date(v);return useLocalTZ?d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):
+                                                          d.toISOString().substring(11,16)+' UTC'; } },
+    grid:{ color:'rgba(148,163,184,.2)' }
+  };
 }
-async function loadAndRender(){try{render(await fetchJsonNoCache(BLOB_URL));}
-  catch(e){console.error(e);}}
-document.getElementById('tzToggle').addEventListener('change',e=>{
-  useLocalTZ=!useLocalTZ;loadAndRender();
+
+function makeChart(ctx, datasets, plugins=[]) {
+  return new Chart(ctx, {
+    type:'line',
+    data:{ datasets },
+    options:{
+      parsing:true, animation:false, normalized:true,
+      plugins:{legend:{display:true, labels:{color:'#e2e8f0'}},
+               tooltip:{mode:'index',intersect:false,callbacks:{title:(c)=> {
+                 const d=new Date(c[0].parsed.x); return useLocalTZ?fmtLocal(d):fmtUTC(d); }}}},
+      scales:{
+        x: xTimeScale(),
+        y:{ ticks:{color:'#e2e8f0'}, grid:{color:'rgba(148,163,184,.2)'} }
+      }
+    },
+    plugins
+  });
+}
+
+function render(j){
+  const data = Array.isArray(j.data) ? j.data : [];
+  const host = j.host ?? 'raspberrypi';
+  document.getElementById('host').textContent = host;
+
+  // current summary
+  const last = data.length ? data[data.length-1] : null;
+  const curTemp = last ? Number(last.temp_c) : NaN;
+  const curEl = document.getElementById('cur');
+  curEl.textContent = isFinite(curTemp) ? curTemp.toFixed(1) : '—';
+  curEl.className = 'stat ' + (isFinite(curTemp) ? (curTemp>=HOT_THRESHOLD?'hot stat':'ok stat') : 'stat');
+
+  const upd = last ? new Date(last.ts) : null;
+  document.getElementById('tz-label').textContent = useLocalTZ ? 'Local' : 'UTC';
+  document.getElementById('upd').textContent = upd ? (useLocalTZ ? fmtLocal(upd) : fmtUTC(upd)) : '—';
+
+  // badges
+  const uplink = last?.uplink_if ?? '—';
+  const defif  = last?.default_if ?? '—';
+  const bridge = !!last?.bridge_active;
+  document.getElementById('uplinkBadge').textContent  = 'uplink: ' + uplink;
+  document.getElementById('defaultBadge').textContent = 'default: ' + defif;
+  const bb = document.getElementById('bridgeBadge');
+  bb.textContent = 'bridge: ' + (bridge ? 'ACTIVE' : 'idle');
+  bb.className = 'badge ' + (bridge ? 'ok' : '');
+
+  // datasets
+  const ptsTemp   = toPoints(data, 'temp_c');
+  const ptsCPU    = toPoints(data, 'cpu_percent');
+  const ptsRAM    = toPoints(data, 'ram_percent');
+  const ptsUpMbps = toPoints(data, 'net_tx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
+  const ptsDnMbps = toPoints(data, 'net_rx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
+
+  // Chart 1: Temperature
+  if(!charts.temp){
+    charts.temp = makeChart(document.getElementById('chartTemp').getContext('2d'), [
+      {label:'Temperature (°C)', data: ptsTemp, borderColor:'#60a5fa', pointRadius:0, tension:.2}
+    ], [thresholdFillPlugin]);
+  } else {
+    charts.temp.data.datasets[0].data = ptsTemp;
+    charts.temp.options.scales.x = xTimeScale();
+    charts.temp.update();
+  }
+
+  // Chart 2: CPU & RAM
+  if(!charts.cpu){
+    charts.cpu = makeChart(document.getElementById('chartCpuRam').getContext('2d'), [
+      {label:'CPU %', data: ptsCPU, borderColor:'#93c5fd', pointRadius:0, tension:.2},
+      {label:'RAM %', data: ptsRAM, borderColor:'#a78bfa', pointRadius:0, tension:.2}
+    ]);
+    charts.cpu.options.scales.y.suggestedMin = 0;
+    charts.cpu.options.scales.y.suggestedMax = 100;
+    charts.cpu.update();
+  } else {
+    charts.cpu.data.datasets[0].data = ptsCPU;
+    charts.cpu.data.datasets[1].data = ptsRAM;
+    charts.cpu.options.scales.x = xTimeScale();
+    charts.cpu.update();
+  }
+
+  // Chart 3: Network (Mb/s)
+  if(!charts.net){
+    charts.net = makeChart(document.getElementById('chartNet').getContext('2d'), [
+      {label:'Upload (Mb/s)',   data: ptsUpMbps, borderColor:'#34d399', pointRadius:0, tension:.2},
+      {label:'Download (Mb/s)', data: ptsDnMbps, borderColor:'#f472b6', pointRadius:0, tension:.2}
+    ]);
+    charts.net.update();
+  } else {
+    charts.net.data.datasets[0].data = ptsUpMbps;
+    charts.net.data.datasets[1].data = ptsDnMbps;
+    charts.net.options.scales.x = xTimeScale();
+    charts.net.update();
+  }
+}
+
+async function loadAndRender(){
+  try { render(await fetchJsonNoCache(BLOB_URL)); } catch(e){ console.error(e); }
+}
+
+document.getElementById('tzToggle').addEventListener('change', e=>{
+  useLocalTZ = !useLocalTZ;  // default local → toggle to UTC
+  loadAndRender();
 });
-loadAndRender();setInterval(loadAndRender,60_000);
+
+loadAndRender();
+setInterval(loadAndRender, 60_000);
 </script>
 </body>
 </html>
