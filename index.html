@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Raspberry Pi Temperature</title>
+
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --ring:#e5e7eb; --ok:#10b981; --hot:#ef4444; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: var(--ink); }
+  .card { max-width: 980px; margin: 0 auto; padding: 16px 20px; border: 1px solid var(--ring); border-radius: 14px; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: baseline; }
+  .stat { font-size: 2.4rem; font-weight: 700; }
+  .muted { color: var(--muted); font-size: 0.95rem; }
+  #cur.stat.hot { color: var(--hot); }
+  #cur.stat.ok { color: var(--ok); }
+  canvas { width: 100%; max-width: 940px; height: 380px; }
+  .small { font-size: 0.9rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="row">
+    <div>
+      <div class="muted">Host</div>
+      <div id="host" class="stat">—</div>
+    </div>
+    <div>
+      <div class="muted">Current Temp (°C)</div>
+      <div id="cur" class="stat">—</div>
+    </div>
+    <div>
+      <div class="muted">Updated (UTC)</div>
+      <div id="upd" class="stat" style="font-size:1.25rem;">—</div>
+    </div>
+  </div>
+  <p class="small">Auto-refreshes every 60s. Times shown in your local timezone on the chart.</p>
+  <hr/>
+  <canvas id="chart"></canvas>
+</div>
+
+<!-- Chart.js + time adapter (needed for time axis) -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
+<script>
+const BLOB_URL = "https://storagetemperaturedata.blob.core.windows.net/telemetry/temps.json";
+
+const HOT_THRESHOLD = 70; // °C — tweak as you like
+let chart;
+
+async function fetchJsonNoCache(url) {
+  const bust = "_ts=" + Date.now();
+  const sep = url.includes("?") ? "&" : "?";
+  const r = await fetch(url + sep + bust, { cache: "no-store" });
+  if (!r.ok) throw new Error("Failed to fetch: " + r.status);
+  return await r.json();
+}
+
+function render(j) {
+  const host = j.host ?? "raspberrypi";
+  const updated = j.updated_utc ?? "—";
+  const data = Array.isArray(j.data) ? j.data : [];
+
+  document.getElementById("host").textContent = host;
+  document.getElementById("upd").textContent = updated;
+
+  const cur = data.length ? Number(data[data.length - 1].temp_c) : NaN;
+  const curEl = document.getElementById("cur");
+  curEl.textContent = isFinite(cur) ? cur.toFixed(1) : "—";
+  curEl.classList.remove("ok","hot");
+  if (isFinite(cur)) curEl.classList.add(cur >= HOT_THRESHOLD ? "hot" : "ok");
+
+  const labels = data.map(d => new Date(d.ts));
+  const temps  = data.map(d => d.temp_c);
+
+  const ds = {
+    label: "Temperature (°C)",
+    data: temps,
+    tension: 0.2,
+    fill: false,
+    pointRadius: 0
+  };
+
+  if (!chart) {
+    chart = new Chart(document.getElementById("chart").getContext("2d"), {
+      type: "line",
+      data: { labels, datasets: [ds] },
+      options: {
+        parsing: false,
+        animation: false,
+        normalized: true,
+        plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+        scales: {
+          x: { type: 'time', time: { unit: 'hour' } },
+          y: { title: { display: true, text: '°C' }, suggestedMin: 20, suggestedMax: 80 }
+        }
+      }
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = temps;
+    chart.update();
+  }
+}
+
+async function loadAndRender() {
+  try {
+    const j = await fetchJsonNoCache(BLOB_URL);
+    render(j);
+  } catch (e) {
+    console.error(e);
+    // Optional: show a subtle message for fetch errors
+  }
+}
+
+// Initial load + auto-refresh every 60s
+loadAndRender();
+setInterval(loadAndRender, 60_000);
+</script>
+</body>
+</html>
