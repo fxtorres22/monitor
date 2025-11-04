@@ -4,200 +4,116 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Raspberry Pi Temperature</title>
+
 <style>
-  :root { --ink:#1f2937; --muted:#6b7280; --ring:#e5e7eb; --ok:#10b981; --hot:#ef4444; }
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: var(--ink); }
-  .card { max-width: 980px; margin: 0 auto; padding: 16px 20px; border: 1px solid var(--ring); border-radius: 14px; }
-  .row { display: flex; gap: 24px; flex-wrap: wrap; align-items: baseline; }
-  .stat { font-size: 2.4rem; font-weight: 700; }
-  .muted { color: var(--muted); font-size: 0.95rem; }
-  #cur.stat.hot { color: var(--hot); }
-  #cur.stat.ok { color: var(--ok); }
-  canvas { width: 100%; max-width: 940px; height: 380px; }
-  .small { font-size: 0.9rem; color: var(--muted); }
-  .controls { display:flex; gap:16px; align-items:center; margin: 8px 0 0; }
-  label { user-select:none; }
+  :root {
+    --bg:#0f172a;           /* dark navy background  */
+    --card:#1e293b;         /* slightly lighter panel */
+    --ink:#f9fafb;          /* main text */
+    --muted:#94a3b8;        /* secondary text */
+    --ring:#334155;         /* borders */
+    --ok:#22c55e;
+    --hot:#f87171;
+  }
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--ink);
+            font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
+  .card{max-width:980px;margin:2rem auto;padding:1rem 1.25rem;background:var(--card);
+        border:1px solid var(--ring);border-radius:14px;box-shadow:0 4px 14px rgba(0,0,0,.3);}
+  .row{display:flex;gap:24px;flex-wrap:wrap;align-items:baseline;}
+  .stat{font-size:2.4rem;font-weight:700;}
+  .muted{color:var(--muted);font-size:.95rem;}
+  #cur.stat.hot{color:var(--hot);}#cur.stat.ok{color:var(--ok);}
+  canvas{width:100%;max-width:940px;height:380px;}
+  .controls{display:flex;gap:16px;align-items:center;margin:8px 0 0;}
+  label{user-select:none;}
+  .small{font-size:.9rem;color:var(--muted);}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="row">
-    <div>
-      <div class="muted">Host</div>
-      <div id="host" class="stat">—</div>
-    </div>
-    <div>
-      <div class="muted">Current Temp (°C)</div>
-      <div id="cur" class="stat">—</div>
-    </div>
-    <div>
-      <div class="muted">Updated (<span id="tz-label">UTC</span>)</div>
-      <div id="upd" class="stat" style="font-size:1.25rem;">—</div>
-    </div>
+    <div><div class="muted">Host</div><div id="host" class="stat">—</div></div>
+    <div><div class="muted">Current Temp (°C)</div><div id="cur" class="stat">—</div></div>
+    <div><div class="muted">Updated (<span id="tz-label">Local</span>)</div>
+         <div id="upd" class="stat" style="font-size:1.25rem;">—</div></div>
   </div>
 
   <div class="controls">
-    <label><input type="checkbox" id="tzToggle"> Show times in local timezone</label>
-    <span class="small">Auto-refreshes every 60s</span>
+    <label><input type="checkbox" id="tzToggle"> Show times in UTC</label>
+    <span class="small">Auto-refreshes every 60 s</span>
   </div>
 
   <hr/>
   <canvas id="chart"></canvas>
 </div>
 
-<!-- Chart.js + time adapter -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
 <script>
 const BLOB_URL = "https://storagetemperaturedata.blob.core.windows.net/telemetry/temps.json";
-const HOT_THRESHOLD = 70; // °C
+const HOT_THRESHOLD = 70;
 let chart;
-let useLocalTZ = false; // false = UTC display
+let useLocalTZ = true; // default → local time
 
-function fmtUTC(d){
-  // d is a Date
-  return d.toISOString().replace('T',' ').slice(0,19) + "Z";
+function fmtUTC(d){return d.toISOString().replace('T',' ').slice(0,19)+'Z';}
+function fmtLocal(d){return d.toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',
+                                                  hour:'2-digit',minute:'2-digit',second:'2-digit'});}
+async function fetchJsonNoCache(url){
+  const bust='_ts='+Date.now();const sep=url.includes('?')?'&':'?';
+  const r=await fetch(url+sep+bust,{cache:'no-store'});
+  if(!r.ok)throw new Error('Fetch failed');return await r.json();
 }
-function fmtLocal(d){
-  return d.toLocaleString([], {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'});
-}
-
-async function fetchJsonNoCache(url) {
-  const bust = "_ts=" + Date.now();
-  const sep = url.includes("?") ? "&" : "?";
-  const r = await fetch(url + sep + bust, { cache: "no-store" });
-  if (!r.ok) throw new Error("Failed to fetch: " + r.status);
-  return await r.json();
-}
-
-// --- Shading plugin above threshold ---
-const thresholdFillPlugin = {
-  id: 'thresholdFill',
-  beforeDraw(chart, args, pluginOptions) {
-    const yScale = chart.scales.y;
-    const chartArea = chart.chartArea;
-    if (!yScale || !chartArea) return;
-
-    const y = yScale.getPixelForValue(HOT_THRESHOLD);
-    const ctx = chart.ctx;
-
-    // Fill from HOT_THRESHOLD up to top
-    ctx.save();
-    ctx.globalAlpha = 0.12;
-    ctx.fillStyle = '#ef4444'; // will be muted by alpha
-    ctx.fillRect(chartArea.left, chartArea.top, chartArea.right - chartArea.left, Math.max(0, y - chartArea.top));
-    ctx.restore();
-
-    // Draw a thin line at threshold
-    ctx.save();
-    ctx.strokeStyle = '#ef4444';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4,3]);
-    ctx.beginPath();
-    ctx.moveTo(chartArea.left, y);
-    ctx.lineTo(chartArea.right, y);
-    ctx.stroke();
-    ctx.restore();
-  }
+const thresholdFillPlugin={
+  id:'thresholdFill',
+  beforeDraw(chart){const yS=chart.scales.y, area=chart.chartArea;if(!yS)return;
+    const y=yS.getPixelForValue(HOT_THRESHOLD), ctx=chart.ctx;
+    ctx.save();ctx.globalAlpha=.15;ctx.fillStyle='#ef4444';
+    ctx.fillRect(area.left,area.top,area.right-area.left,Math.max(0,y-area.top));ctx.restore();
+    ctx.save();ctx.strokeStyle='#ef4444';ctx.setLineDash([4,3]);
+    ctx.beginPath();ctx.moveTo(area.left,y);ctx.lineTo(area.right,y);ctx.stroke();ctx.restore();}
 };
+function buildDataset(data){return data.map(d=>({x:new Date(d.ts),y:+d.temp_c}));}
+function tooltipTitle(ctx){const d=new Date(ctx[0].parsed.x);
+  return useLocalTZ?fmtLocal(d):fmtUTC(d);}
+function tickFormatter(value){const d=new Date(value);
+  return useLocalTZ?d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):
+                    d.toISOString().substring(11,16)+' UTC';}
+function render(j){
+  const host=j.host??'raspberrypi', data=Array.isArray(j.data)?j.data:[];
+  document.getElementById('host').textContent=host;
+  const cur=data.length?+data.at(-1).temp_c:NaN;
+  const curEl=document.getElementById('cur');
+  curEl.textContent=isFinite(cur)?cur.toFixed(1):'—';
+  curEl.className='stat '+(isFinite(cur)?(cur>=HOT_THRESHOLD?'hot stat':'ok stat'):'stat');
+  const updated=data.length?new Date(data.at(-1).ts):null;
+  document.getElementById('tz-label').textContent=useLocalTZ?'Local':'UTC';
+  document.getElementById('upd').textContent=updated?(useLocalTZ?fmtLocal(updated):fmtUTC(updated)):'—';
 
-function buildDataset(data) {
-  // Robust: use x/y objects so time scale reads timestamps directly
-  const points = data.map(d => ({
-    x: new Date(d.ts),                 // Date object from ISO timestamp
-    y: Number(d.temp_c)               // numeric value
-  }));
-  return points;
-}
-
-function tickFormatter(value, index, ticks) {
-  // value is a numeric pixel value mapped back to time by adapter; use scale.getLabelForValue
-  // But simpler: Chart.js passes the raw value in ms epoch for time scale. Wrap as Date:
-  const d = new Date(value);
-  return useLocalTZ ? fmtLocal(d) : fmtUTC(d);
-}
-
-function tooltipTitle(context) {
-  const d = new Date(context[0].parsed.x);
-  return useLocalTZ ? fmtLocal(d) : fmtUTC(d);
-}
-
-function render(j) {
-  const host = j.host ?? "raspberrypi";
-  const data = Array.isArray(j.data) ? j.data : [];
-
-  // Top stats
-  document.getElementById("host").textContent = host;
-  const cur = data.length ? Number(data[data.length - 1].temp_c) : NaN;
-  const curEl = document.getElementById("cur");
-  curEl.textContent = isFinite(cur) ? cur.toFixed(1) : "—";
-  curEl.classList.remove("ok","hot");
-  if (isFinite(cur)) curEl.classList.add(cur >= HOT_THRESHOLD ? "hot" : "ok");
-
-  const updated = data.length ? new Date(data[data.length - 1].ts) : null;
-  const tzLabel = document.getElementById('tz-label');
-  tzLabel.textContent = useLocalTZ ? 'Local' : 'UTC';
-  document.getElementById("upd").textContent = updated ? (useLocalTZ ? fmtLocal(updated) : fmtUTC(updated)) : "—";
-
-  const points = buildDataset(data);
-
-  if (!chart) {
-    chart = new Chart(document.getElementById("chart").getContext("2d"), {
-      type: "line",
-      data: { datasets: [{
-        label: "Temperature (°C)",
-        data: points,
-        tension: 0.2,
-        fill: false,
-        pointRadius: 0
-      }]},
-      options: {
-        parsing: true,      // we're providing {x,y} objects
-        animation: false,
-        normalized: true,
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            mode: 'index',
-            intersect: false,
-            callbacks: { title: tooltipTitle }
-          }
-        },
-        scales: {
-          x: {
-            type: 'time',
-            time: { unit: 'hour' },
-            ticks: { callback: tickFormatter }
-          },
-          y: { title: { display: true, text: '°C' }, suggestedMin: 20, suggestedMax: 80 }
+  const points=buildDataset(data);
+  if(!chart){
+    chart=new Chart(document.getElementById('chart').getContext('2d'),{
+      type:'line',
+      data:{datasets:[{label:'Temperature (°C)',data:points,tension:.2,pointRadius:0,borderColor:'#60a5fa'}]},
+      options:{
+        parsing:true,animation:false,normalized:true,
+        plugins:{legend:{display:false},tooltip:{mode:'index',intersect:false,callbacks:{title:tooltipTitle}}},
+        scales:{
+          x:{type:'time',time:{unit:'minute',stepSize:10}, // 10-min grid
+             ticks:{color:'#e2e8f0',callback:tickFormatter},grid:{color:'rgba(148,163,184,.2)'}},
+          y:{title:{display:true,text:'°C'},ticks:{color:'#e2e8f0'},
+             grid:{color:'rgba(148,163,184,.2)'},suggestedMin:20,suggestedMax:80}
         }
       },
-      plugins: [thresholdFillPlugin]
+      plugins:[thresholdFillPlugin]
     });
-  } else {
-    chart.data.datasets[0].data = points;
-    chart.update();
-  }
+  }else{chart.data.datasets[0].data=points;chart.update();}
 }
-
-async function loadAndRender() {
-  try {
-    const j = await fetchJsonNoCache(BLOB_URL);
-    render(j);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-document.getElementById('tzToggle').addEventListener('change', (e) => {
-  useLocalTZ = e.target.checked;
-  // Re-render with the cached last data by calling loadAndRender (quick and simple)
-  loadAndRender();
+async function loadAndRender(){try{render(await fetchJsonNoCache(BLOB_URL));}
+  catch(e){console.error(e);}}
+document.getElementById('tzToggle').addEventListener('change',e=>{
+  useLocalTZ=!useLocalTZ;loadAndRender();
 });
-
-// Initial load + auto-refresh every 60s
-loadAndRender();
-setInterval(loadAndRender, 60_000);
+loadAndRender();setInterval(loadAndRender,60_000);
 </script>
 </body>
 </html>
