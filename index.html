@@ -18,8 +18,7 @@
   #cur.stat.hot{color:var(--hot);}#cur.stat.ok{color:var(--ok);}
   canvas{width:100%;height:360px;}
   .controls{display:flex;gap:16px;align-items:center;margin:8px 0;}
-  .badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-  .badge{border:1px solid var(--ring);border-radius:999px;padding:4px 10px;font-size:.9rem;color:var(--muted);}
+  .badge{border:1px solid var(--ring);border-radius:999px;padding:4px 10px;font-size:.9rem;color:var(--muted);margin-left:8px}
   .bridgeStatus{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;}
   .bridgeText{font-weight:800;font-size:1.6rem;letter-spacing:.02em}
   .bridgeText.active{color:#ff6b6b;}      /* vivid red */
@@ -40,15 +39,13 @@
     <div class="controls">
       <label><input type="checkbox" id="tzToggle"> Show times in UTC</label>
       <span class="muted">Auto-refresh 60 s</span>
+      <span id="uplinkBadge" class="badge">uplink: —</span>
+      <span id="defaultBadge" class="badge">default: —</span>
     </div>
 
-    <!-- Prominent Bridge Status section -->
+    <!-- Prominent Bridge Status -->
     <div class="bridgeStatus">
       <div id="bridgeText" class="bridgeText idle">BRIDGE: idle</div>
-      <div class="badges">
-        <div id="uplinkBadge" class="badge">uplink: —</div>
-        <div id="defaultBadge" class="badge">default: —</div>
-      </div>
     </div>
   </div>
 
@@ -65,7 +62,7 @@ const HOT_THRESHOLD = 70;
 let useLocalTZ = true;
 let charts = {};
 
-/* ---------- helpers ---------- */
+/* ---------------- helpers ---------------- */
 function fmtUTC(d){return d.toISOString().replace('T',' ').slice(0,19)+'Z';}
 function fmtLocal(d){return d.toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',
                                                   hour:'2-digit',minute:'2-digit',second:'2-digit'});}
@@ -76,7 +73,39 @@ async function fetchJsonNoCache(url){
 function toPoints(arr, key){return arr.map(d=>({x:new Date(d.ts), y:Number(d[key])})).filter(p=>Number.isFinite(p.y));}
 function mbpsFromBps(bps){return (bps==null)?null:(bps/1_000_000);}
 
-/* ---------- temperature threshold shading plugin ---------- */
+/* --------- time axis with clean 10-min ticks/labels --------- */
+function xTimeScale() {
+  return {
+    type:'time',
+    distribution:'linear',
+    bounds:'ticks',
+    time:{ unit:'minute', stepSize:10, round:'minute' }, // tick/grid every 10 min
+    ticks:{
+      autoSkip:true,
+      autoSkipPadding:8,
+      maxRotation:0,
+      minRotation:0,
+      color:'#e2e8f0',
+      callback:(v)=>{                       // label ONLY on exact 10-minute boundaries
+        const d=new Date(v);
+        const m= useLocalTZ ? d.getMinutes() : new Date(d.toISOString()).getUTCMinutes();
+        if(m % 10 !== 0) return '';
+        return useLocalTZ
+          ? d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+          : d.toISOString().substring(11,16)+' UTC';
+      }
+    },
+    grid:{ color:'rgba(148,163,184,.2)' }
+  };
+}
+
+/* --------- tooltip titles honor timezone --------- */
+function tooltipTitle(ctx){
+  const d = new Date(ctx[0].parsed.x);
+  return useLocalTZ ? fmtLocal(d) : fmtUTC(d);
+}
+
+/* --------- threshold shading + small label on temp chart --------- */
 const thresholdFillPlugin = {
   id: 'thresholdFill',
   beforeDraw(chart) {
@@ -85,63 +114,53 @@ const thresholdFillPlugin = {
     const y = yS.getPixelForValue(HOT_THRESHOLD);
     const ctx = chart.ctx;
 
-    // Shade region ABOVE threshold (more visible)
+    // Shaded region above threshold
     ctx.save();
-    ctx.globalAlpha = 0.22;         // slightly stronger so it's obvious on dark
+    ctx.globalAlpha = 0.22;
     ctx.fillStyle = '#ef4444';
     ctx.fillRect(area.left, area.top, area.right - area.left, Math.max(0, y - area.top));
     ctx.restore();
 
-    // Dashed line at threshold
+    // Dashed line
     ctx.save();
     ctx.strokeStyle = '#ff6b6b';
     ctx.lineWidth = 1.25;
     ctx.setLineDash([6,4]);
-    ctx.beginPath();
-    ctx.moveTo(area.left, y);
-    ctx.lineTo(area.right, y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(area.left, y); ctx.lineTo(area.right, y); ctx.stroke();
+    ctx.restore();
+
+    // Tiny annotation text at the right edge
+    ctx.save();
+    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillStyle = '#ffd7d7';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(`${HOT_THRESHOLD} °C`, area.right - 6, y - 4);
     ctx.restore();
   }
 };
 
-/* ---------- axes/tooltip ---------- */
-function xTimeScale() {
-  return {
-    type:'time',
-    time:{ unit:'minute', stepSize:10 }, // 10-minute grid
-    ticks:{ color:'#e2e8f0',
-      callback:(v)=>{const d=new Date(v);return useLocalTZ?d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
-                                                         :d.toISOString().substring(11,16)+' UTC'; } },
-    grid:{ color:'rgba(148,163,184,.2)' }
-  };
-}
-function tooltipTitle(ctx){
-  const d = new Date(ctx[0].parsed.x);
-  return useLocalTZ ? fmtLocal(d) : fmtUTC(d);
-}
-
-/* ---------- chart factory ---------- */
+/* --------- chart factory --------- */
 function makeChart(ctx, datasets, plugins=[]) {
   return new Chart(ctx, {
-    type: 'line',
-    data: { datasets },
-    options: {
-      parsing: true, animation: false, normalized: true,
-      plugins: {
-        legend: { display: true, labels:{ color:'#e2e8f0' } },
-        tooltip: { mode:'index', intersect:false, callbacks:{ title: tooltipTitle } }
+    type:'line',
+    data:{ datasets },
+    options:{
+      parsing:true, animation:false, normalized:true,
+      plugins:{
+        legend:{display:true, labels:{color:'#e2e8f0'}},
+        tooltip:{mode:'index', intersect:false, callbacks:{ title: tooltipTitle }}
       },
-      scales: {
+      scales:{
         x: xTimeScale(),
-        y: { ticks:{ color:'#e2e8f0' }, grid:{ color:'rgba(148,163,184,.2)' } }
+        y:{ ticks:{color:'#e2e8f0'}, grid:{color:'rgba(148,163,184,.2)'} }
       }
     },
     plugins
   });
 }
 
-/* ---------- render ---------- */
+/* ---------------- render ---------------- */
 function render(j){
   const data = Array.isArray(j.data) ? j.data : [];
   const host = j.host ?? 'raspberrypi';
@@ -149,18 +168,17 @@ function render(j){
 
   const last = data.length ? data[data.length-1] : null;
 
-  // current temp
+  // Summary
   const curTemp = last ? Number(last.temp_c) : NaN;
   const curEl = document.getElementById('cur');
   curEl.textContent = isFinite(curTemp) ? curTemp.toFixed(1) : '—';
   curEl.className = 'stat ' + (isFinite(curTemp) ? (curTemp>=HOT_THRESHOLD?'hot stat':'ok stat') : 'stat');
 
-  // updated timestamp
   const upd = last ? new Date(last.ts) : null;
   document.getElementById('tz-label').textContent = useLocalTZ ? 'Local' : 'UTC';
   document.getElementById('upd').textContent = upd ? (useLocalTZ ? fmtLocal(upd) : fmtUTC(upd)) : '—';
 
-  // bridge status: big, red if active; green if idle
+  // Bridge info
   const uplink = last?.uplink_if ?? '—';
   const defif  = last?.default_if ?? '—';
   const bridge = !!last?.bridge_active;
@@ -171,14 +189,14 @@ function render(j){
   bt.textContent = 'BRIDGE: ' + (bridge ? 'ACTIVE' : 'idle');
   bt.className = 'bridgeText ' + (bridge ? 'active' : 'idle');
 
-  // datasets
+  // Datasets
   const ptsTemp   = toPoints(data, 'temp_c');
   const ptsCPU    = toPoints(data, 'cpu_percent');
   const ptsRAM    = toPoints(data, 'ram_percent');
   const ptsUpMbps = toPoints(data, 'net_tx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
   const ptsDnMbps = toPoints(data, 'net_rx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
 
-  // Chart: Temperature (with threshold shading)
+  // Chart: Temperature
   if(!charts.temp){
     charts.temp = makeChart(document.getElementById('chartTemp').getContext('2d'), [
       {label:'Temperature (°C)', data: ptsTemp, borderColor:'#60a5fa', pointRadius:0, tension:.2}
@@ -188,7 +206,7 @@ function render(j){
     charts.temp.update();
   } else {
     charts.temp.data.datasets[0].data = ptsTemp;
-    charts.temp.options.scales.x = xTimeScale();
+    charts.temp.options.scales.x = xTimeScale(); // re-apply axis config (timezone)
     charts.temp.update();
   }
 
@@ -223,7 +241,7 @@ function render(j){
   }
 }
 
-/* ---------- boot ---------- */
+/* ---------------- boot ---------------- */
 async function loadAndRender(){ try{ render(await fetchJsonNoCache(BLOB_URL)); }catch(e){ console.error(e); } }
 document.getElementById('tzToggle').addEventListener('change', e=>{ useLocalTZ = !useLocalTZ; loadAndRender(); });
 loadAndRender(); setInterval(loadAndRender, 60_000);
