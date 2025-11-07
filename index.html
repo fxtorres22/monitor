@@ -21,8 +21,8 @@
   .badge{border:1px solid var(--ring);border-radius:999px;padding:4px 10px;font-size:.9rem;color:var(--muted);margin-left:8px}
   .bridgeStatus{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between}
   .bridgeText{font-weight:900;font-size:1.6rem;letter-spacing:.02em}
-  .bridgeText.active{color:#ff6b6b;}  /* vivid red */
-  .bridgeText.idle{color:#22c55e;}    /* green */
+  .bridgeText.active{color:#ff6b6b;}
+  .bridgeText.idle{color:#22c55e;}
   hr{border:none;border-top:1px solid var(--ring);margin:12px 0;}
 </style>
 </head>
@@ -57,12 +57,16 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
 <script>
-const BLOB_URL = "https://storagetemperaturedata.blob.core.windows.net/telemetry/temps.json";
+/* ---------- CONFIG ---------- */
+// Public charts blob (host-scoped). Change host segment if needed.
+const BLOB_URL = "https://storagetemperaturedata.blob.core.windows.net/charts/temps.json";
 const HOT_THRESHOLD = 70;
+
+/* ---------- STATE ---------- */
 let useLocalTZ = true;
 let charts = {};
 
-/* ---------------- helpers ---------------- */
+/* ---------- HELPERS ---------- */
 function fmtUTC(d){return d.toISOString().replace('T',' ').slice(0,19)+'Z';}
 function fmtLocal(d){return d.toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',
                                                   hour:'2-digit',minute:'2-digit',second:'2-digit'});}
@@ -72,6 +76,38 @@ async function fetchJsonNoCache(url){
 }
 function toPoints(arr, key){return arr.map(d=>({x:new Date(d.ts), y:Number(d[key])})).filter(p=>Number.isFinite(p.y));}
 function mbpsFromBps(bps){return (bps==null)?null:(bps/1_000_000);}
+
+/* Normalize Logic App payload: count->number, data->array (even if stringified) */
+function normalizePayload(j){
+  let data;
+  if (Array.isArray(j?.data)) {
+    data = j.data;
+  } else if (typeof j?.data === 'string') {
+    try { data = JSON.parse(j.data); } catch { data = []; }
+  } else {
+    data = [];
+  }
+  const cnt = Number.isFinite(Number(j?.count)) ? Number(j.count) : data.length;
+  return { updated_utc: j?.updated_utc ?? null, count: cnt, data };
+}
+
+/* Derive bps from byte counters + timestamps */
+function addDerivedNetRates(arr){
+  for (let i = 1; i < arr.length; i++){
+    const a = arr[i-1], b = arr[i];
+    const ta = new Date(a.ts).getTime(), tb = new Date(b.ts).getTime();
+    const dt = (tb - ta)/1000;
+    if (dt > 0){
+      const d = (key) => (Number(b[key] ?? 0) - Number(a[key] ?? 0)) / dt;
+      b.wan_rx_bps = Math.max(0, d('wan_rx_bytes'));
+      b.wan_tx_bps = Math.max(0, d('wan_tx_bytes'));
+      b.lan_rx_bps = Math.max(0, d('lan_rx_bytes'));
+      b.lan_tx_bps = Math.max(0, d('lan_tx_bytes'));
+    } else {
+      b.wan_rx_bps = b.wan_tx_bps = b.lan_rx_bps = b.lan_tx_bps = null;
+    }
+  }
+}
 
 /* --- snap domains so grid lands on exact :00/:10/:20... boundaries --- */
 function floorTo10m(ms, useLocal) {
@@ -154,10 +190,9 @@ function makeChart(ctx, datasets, plugins=[]) {
 /* ---------------- render ---------------- */
 function render(j){
   const data = Array.isArray(j.data) ? j.data : [];
-  const host = j.host ?? 'raspberrypi';
-  document.getElementById('host').textContent = host;
-
   const last = data.length ? data[data.length-1] : null;
+  const host = last?.host ?? 'raspberrypi';
+  document.getElementById('host').textContent = host;
 
   // Summary
   const curTemp = last ? Number(last.temp_c) : NaN;
@@ -170,10 +205,10 @@ function render(j){
   document.getElementById('upd').textContent = upd ? (useLocalTZ ? fmtLocal(upd) : fmtUTC(upd)) : '—';
 
   // Bridge info
-  const wan = last?.wan_if ?? '—';
-  const lan = last?.lan_if ?? '—';
-  document.getElementById('wanBadge').textContent = 'wan: ' + wan;
-  document.getElementById('lanBadge').textContent = 'lan: ' + lan;
+  const wanIf = last?.wan_if ?? '—';
+  const lanIf = last?.lan_if ?? '—';
+  document.getElementById('wanBadge').textContent = 'wan: ' + wanIf;
+  document.getElementById('lanBadge').textContent = 'lan: ' + lanIf;
   const bridge = !!last?.bridge_active;
   const bt = document.getElementById('bridgeText');
   bt.textContent = 'BRIDGE: ' + (bridge ? 'ACTIVE' : 'idle');
@@ -232,7 +267,14 @@ function render(j){
 }
 
 /* ---------------- boot ---------------- */
-async function loadAndRender(){ try{ render(await fetchJsonNoCache(BLOB_URL)); }catch(e){ console.error(e); } }
+async function loadAndRender(){
+  try{
+    const raw = await fetchJsonNoCache(BLOB_URL);
+    const norm = normalizePayload(raw);
+    addDerivedNetRates(norm.data);
+    render(norm);
+  }catch(e){ console.error(e); }
+}
 document.getElementById('tzToggle').addEventListener('change', e=>{ useLocalTZ = !useLocalTZ; loadAndRender(); });
 loadAndRender(); setInterval(loadAndRender, 60_000);
 </script>
