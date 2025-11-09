@@ -3,280 +3,427 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Raspberry Pi Telemetry</title>
+<title>Raspberry Pi Telemetry – Bridge Dashboard</title>
+
+<!-- Chart.js + date adapter -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0"></script>
+
 <style>
-  :root{--bg:#0f172a;--card:#1e293b;--ink:#f9fafb;--muted:#94a3b8;--ring:#334155;
-        --ok:#22c55e;--hot:#f87171;--accent:#60a5fa;}
+  :root{
+    --bg:#0b1220; --panel:#10192e; --ink:#e5e7eb; --muted:#94a3b8; --ring:#233052;
+    --accent:#60a5fa; --ok:#22c55e; --warn:#f59e0b; --hot:#ef4444; --grid:#1b2947;
+    --chip:#0f172a;
+  }
+  *{box-sizing:border-box}
   html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
-    font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
-  .wrap{max-width:1080px;margin:24px auto;padding:0 12px;}
-  .card{background:var(--card);border:1px solid var(--ring);border-radius:14px;
-    box-shadow:0 4px 14px rgba(0,0,0,.3);padding:16px 20px;margin-bottom:16px;}
-  .row{display:flex;gap:24px;flex-wrap:wrap;align-items:baseline;}
-  .stat{font-size:2.2rem;font-weight:700;}
-  .muted{color:var(--muted);font-size:.95rem;}
-  #cur.stat.hot{color:var(--hot);}#cur.stat.ok{color:var(--ok);}
-  canvas{width:100%;height:360px;}
-  .controls{display:flex;gap:16px;align-items:center;margin:8px 0;}
-  .badge{border:1px solid var(--ring);border-radius:999px;padding:4px 10px;font-size:.9rem;color:var(--muted);margin-left:8px}
-  .bridgeStatus{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:space-between}
-  .bridgeText{font-weight:900;font-size:1.6rem;letter-spacing:.02em}
-  .bridgeText.active{color:#ff6b6b;}
-  .bridgeText.idle{color:#22c55e;}
-  hr{border:none;border-top:1px solid var(--ring);margin:12px 0;}
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+  .wrap{max-width:1200px;margin:28px auto;padding:0 16px}
+  .header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px}
+  h1{font-size:1.25rem;margin:0}
+  .card{background:var(--panel);border:1px solid var(--ring);border-radius:14px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.25);margin-bottom:16px}
+  .summary-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+  .kv{background:var(--chip);border:1px solid var(--ring);border-radius:12px;padding:12px}
+  .k{font-size:.8rem;color:var(--muted);margin-bottom:6px}
+  .v{font-size:1.05rem}
+  .chip{display:inline-flex;align-items:center;gap:.5ch;padding:.25rem .6rem;border-radius:999px;border:1px solid var(--ring);background:var(--chip);font-size:.85rem}
+  .chip.ok{border-color:rgba(34,197,94,.3);box-shadow:0 0 0 2px rgba(34,197,94,.08) inset}
+  .chip.idle{border-color:rgba(99,102,241,.25);box-shadow:0 0 0 2px rgba(99,102,241,.06) inset}
+  .chip.warn{border-color:rgba(245,158,11,.3);box-shadow:0 0 0 2px rgba(245,158,11,.08) inset}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+  label{display:flex;flex-direction:column;font-size:.85rem;color:var(--muted);gap:6px}
+  input,select,button{
+    background:var(--chip);color:var(--ink);border:1px solid var(--ring);
+    border-radius:10px;padding:8px 10px;font-size:.95rem;outline:none
+  }
+  button{cursor:pointer}
+  canvas{width:100%;height:340px}
+  .hint{font-size:.85rem;color:var(--muted)}
+  .row-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+  @media (max-width:900px){ .summary-row{grid-template-columns:1fr} .row-2{grid-template-columns:1fr} }
+  .title{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .title h2{font-size:1.05rem;margin:0}
+  .legend-note{font-size:.8rem;color:var(--muted)}
 </style>
 </head>
 <body>
 <div class="wrap">
+
+  <div class="header">
+    <h1>Bridge Telemetry</h1>
+    <span class="chip" id="refreshStatus">Next auto-refresh in 10:00</span>
+  </div>
+
+  <!-- Summary -->
   <div class="card">
-    <div class="row">
-      <div><div class="muted">Host</div><div id="host" class="stat">—</div></div>
-      <div><div class="muted">Temp (°C)</div><div id="cur" class="stat">—</div></div>
-      <div><div class="muted">Updated (<span id="tz-label">Local</span>)</div>
-           <div id="upd" class="stat" style="font-size:1.1rem;">—</div></div>
+    <div class="title">
+      <h2>1) Summary</h2>
+      <span class="legend-note">Data refreshes every 10 minutes</span>
     </div>
-
-    <div class="controls">
-      <label><input type="checkbox" id="tzToggle"> Show times in UTC</label>
-      <span class="muted">Auto-refresh 60 s</span>
-      <span id="wanBadge" class="badge">wan: —</span>
-      <span id="lanBadge" class="badge">lan: —</span>
-    </div>
-
-    <div class="bridgeStatus">
-      <div id="bridgeText" class="bridgeText idle">BRIDGE: idle</div>
-      <div class="muted" id="bridgeHint">Based on WAN/LAN traffic in last interval</div>
+    <div class="summary-row">
+      <div class="kv">
+        <div class="k">Host</div>
+        <div class="v" id="hostName">—</div>
+      </div>
+      <div class="kv">
+        <div class="k">Last point (local)</div>
+        <div class="v" id="lastTs">—</div>
+      </div>
+      <div class="kv">
+        <div class="k">Bridge status</div>
+        <div class="v"><span class="chip idle" id="bridgeStatus">—</span></div>
+      </div>
     </div>
   </div>
 
-  <div class="card"><canvas id="chartTemp"></canvas></div>
-  <div class="card"><canvas id="chartCpuRam"></canvas></div>
-  <div class="card"><canvas id="chartNet"></canvas></div>
+  <!-- Range controls -->
+  <div class="card">
+    <div class="title">
+      <h2>Range</h2>
+      <span class="legend-note">Default: last 48 hours</span>
+    </div>
+    <div class="controls">
+      <label>Preset
+        <select id="presetSelect">
+          <option value="12h">Last 12 hours</option>
+          <option value="24h">Last 24 hours</option>
+          <option value="48h" selected>Last 48 hours</option>
+          <option value="7d">Last 7 days</option>
+          <option value="all">All data</option>
+        </select>
+      </label>
+      <label>Start
+        <input type="datetime-local" id="startInput">
+      </label>
+      <label>End
+        <input type="datetime-local" id="endInput">
+      </label>
+      <button id="applyBtn">Apply</button>
+      <button id="resetBtn" title="Reset to default 48h">Reset</button>
+    </div>
+  </div>
+
+  <!-- 2) Temperature -->
+  <div class="card">
+    <div class="title"><h2>2) Temperature (°C)</h2></div>
+    <canvas id="tempChart"></canvas>
+    <div class="hint">Grid every 10 minutes; labels show each full hour.</div>
+  </div>
+
+  <!-- 3) CPU & RAM -->
+  <div class="card">
+    <div class="title"><h2>3) CPU & RAM (%)</h2></div>
+    <canvas id="cpuRamChart"></canvas>
+  </div>
+
+  <!-- 4 & 5) WAN / LAN throughput -->
+  <div class="row-2">
+    <div class="card">
+      <div class="title"><h2>4) WAN Throughput (Rx/Tx, Mb/s)</h2></div>
+      <canvas id="wanChart"></canvas>
+    </div>
+    <div class="card">
+      <div class="title"><h2>5) LAN Throughput (Rx/Tx, Mb/s)</h2></div>
+      <canvas id="lanChart"></canvas>
+    </div>
+  </div>
+
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3"></script>
 <script>
-/* ---------- CONFIG ---------- */
-// Public charts blob (host-scoped). Change host segment if needed.
-const BLOB_URL = "https://storagetemperaturedata.blob.core.windows.net/charts/temps.json";
-const HOT_THRESHOLD = 70;
+/* 🔗 SET YOUR NDJSON URL HERE */
+const NDJSON_URL = "https://storagetemperaturedata.blob.core.windows.net/raspberry-telemetry/telemetry.ndjson";
 
-/* ---------- STATE ---------- */
-let useLocalTZ = true;
-let charts = {};
+/* Auto-refresh period (ms) */
+const REFRESH_MS = 10 * 60 * 1000;
 
-/* ---------- HELPERS ---------- */
-function fmtUTC(d){return d.toISOString().replace('T',' ').slice(0,19)+'Z';}
-function fmtLocal(d){return d.toLocaleString([], {year:'numeric',month:'2-digit',day:'2-digit',
-                                                  hour:'2-digit',minute:'2-digit',second:'2-digit'});}
-async function fetchJsonNoCache(url){
-  const r=await fetch(url+(url.includes('?')?'&':'?')+'_ts='+Date.now(),{cache:'no-store'});
-  if(!r.ok)throw new Error('fetch '+r.status); return await r.json();
+/* State */
+let rawData = [];          // all rows from NDJSON (parsed objects)
+let filtered = [];         // rows after range filtering
+let charts = {};           // Chart.js instances
+let nextRefreshAt = Date.now() + REFRESH_MS;
+
+/* ---------- Utils ---------- */
+const fmtLocal = (d)=> new Date(d).toLocaleString();
+const byTsAsc = (a,b)=> new Date(a.ts) - new Date(b.ts);
+const clamp = (v,min,max)=> Math.min(Math.max(v,min),max);
+
+/* Convert cumulative bytes to Mb/s using deltas between consecutive points */
+function toRatesMbPerSec(rows, rxKey, txKey){
+  const out = rows.map((r,i)=>{
+    if(i===0){ return { t:new Date(r.ts), rx:null, tx:null }; }
+    const dt = (new Date(rows[i].ts) - new Date(rows[i-1].ts)) / 1000; // seconds
+    const drx = Math.max(0, r[rxKey] - rows[i-1][rxKey]);
+    const dtx = Math.max(0, r[txKey] - rows[i-1][txKey]);
+    const rxbps = dt>0 ? (drx*8)/dt : 0;
+    const txbps = dt>0 ? (dtx*8)/dt : 0;
+    return { t:new Date(r.ts), rx: r[rxKey]!=null ? rxbps/1e6 : null, tx: r[txKey]!=null ? txbps/1e6 : null };
+  });
+  return out;
 }
-function toPoints(arr, key){return arr.map(d=>({x:new Date(d.ts), y:Number(d[key])})).filter(p=>Number.isFinite(p.y));}
-function mbpsFromBps(bps){return (bps==null)?null:(bps/1_000_000);}
 
-/* Normalize Logic App payload: count->number, data->array (even if stringified) */
-function normalizePayload(j){
-  let data;
-  if (Array.isArray(j?.data)) {
-    data = j.data;
-  } else if (typeof j?.data === 'string') {
-    try { data = JSON.parse(j.data); } catch { data = []; }
-  } else {
-    data = [];
+/* Compute Bridge Status.
+   Idea: Over the last hour (or available), compare total WAN vs total LAN byte deltas.
+   If totals are tiny -> Idle. If reasonably large and within 20% -> Active. Else -> Idle.
+*/
+function computeBridgeStatus(rows){
+  if(rows.length < 2) return {label:"No data", cls:"warn"};
+  const windowMs = 60*60*1000; // 1h
+  const end = new Date(rows[rows.length-1].ts).getTime();
+  const start = end - windowMs;
+  const slice = rows.filter(r => new Date(r.ts).getTime() >= start);
+  if(slice.length < 2) return {label:"Insufficient data", cls:"warn"};
+
+  let wan=0, lan=0;
+  for(let i=1;i<slice.length;i++){
+    const a = slice[i-1], b = slice[i];
+    wan += Math.max(0, (b.wan_rx_bytes - a.wan_rx_bytes)) + Math.max(0, (b.wan_tx_bytes - a.wan_tx_bytes));
+    lan += Math.max(0, (b.lan_rx_bytes - a.lan_rx_bytes)) + Math.max(0, (b.lan_tx_bytes - a.lan_tx_bytes));
   }
-  const cnt = Number.isFinite(Number(j?.count)) ? Number(j.count) : data.length;
-  return { updated_utc: j?.updated_utc ?? null, count: cnt, data };
+  const MB = 1024*1024;
+  const tiny = (wan+lan) < (5*MB); // < ~5 MB over the hour → idle traffic
+  if(tiny) return {label:"Idle", cls:"idle"};
+
+  const diff = Math.abs(wan - lan);
+  const rel = diff / Math.max(wan, lan, 1);
+  if(rel <= 0.2) return {label:"Active", cls:"ok"}; // close match (forwarding)
+  return {label:"Idle", cls:"idle"};
 }
 
-/* Derive bps from byte counters + timestamps */
-function addDerivedNetRates(arr){
-  for (let i = 1; i < arr.length; i++){
-    const a = arr[i-1], b = arr[i];
-    const ta = new Date(a.ts).getTime(), tb = new Date(b.ts).getTime();
-    const dt = (tb - ta)/1000;
-    if (dt > 0){
-      const d = (key) => (Number(b[key] ?? 0) - Number(a[key] ?? 0)) / dt;
-      b.wan_rx_bps = Math.max(0, d('wan_rx_bytes'));
-      b.wan_tx_bps = Math.max(0, d('wan_tx_bytes'));
-      b.lan_rx_bps = Math.max(0, d('lan_rx_bytes'));
-      b.lan_tx_bps = Math.max(0, d('lan_tx_bytes'));
-    } else {
-      b.wan_rx_bps = b.wan_tx_bps = b.lan_rx_bps = b.lan_tx_bps = null;
-    }
-  }
-}
-
-/* --- snap domains so grid lands on exact :00/:10/:20... boundaries --- */
-function floorTo10m(ms, useLocal) {
-  const d = new Date(ms);
-  let Y=d.getFullYear(), M=d.getMonth(), D=d.getDate(), h=useLocal?d.getHours():d.getUTCHours();
-  let m = useLocal?d.getMinutes():d.getUTCMinutes();
-  const snap = Math.floor(m/10)*10;
-  return (useLocal ? new Date(Y,M,D,h,snap,0,0) : new Date(Date.UTC(Y,M,D,h,snap,0,0))).getTime();
-}
-function ceilTo10m(ms, useLocal) { const f=floorTo10m(ms,useLocal); return (f===ms)?ms:f+10*60*1000; }
-function computeDomain10m(points, useLocal) {
-  if (!points.length) return {};
-  const t0=points[0].x.getTime(), t1=points[points.length-1].x.getTime();
-  return {min: floorTo10m(t0,useLocal), max: ceilTo10m(t1,useLocal)};
-}
-
-/* --------- time axis: grid every 10 min, labels only at the hour --------- */
-function xTimeScale(min=null, max=null) {
+/* Ticks: grid every 10 minutes, show labels only on the hour */
+function timeScaleOptions(){
   return {
-    type:'time',
-    distribution:'linear',
-    bounds:'ticks',
-    min, max,
-    time:{ unit:'minute', stepSize:10, round:'minute' },
-    ticks:{
-      autoSkip:false, maxRotation:0, minRotation:0, color:'#e2e8f0',
-      callback:(v)=>{
-        const d=new Date(v);
-        const mins = useLocalTZ ? d.getMinutes() : d.getUTCMinutes();
-        if (mins !== 0) return '';
-        return useLocalTZ
-          ? d.toLocaleTimeString([], {hour:'numeric'})
-          : d.toISOString().substring(11,13)+":00 UTC";
+    type: 'time',
+    adapters: { date: {} },
+    time: { unit: 'minute', stepSize: 10 },
+    ticks: {
+      autoSkip: false,
+      callback: (val, idx, ticks) => {
+        const v = ticks[idx].value; // ms
+        const m = new Date(v).getMinutes();
+        return m === 0 ? new Date(v).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
       }
     },
-    grid:{ color:'rgba(148,163,184,.2)' }
+    grid: { color: (ctx)=> ctx.tick && ctx.tick.major ? undefined : getComputedStyle(document.documentElement).getPropertyValue('--grid') }
   };
 }
 
-/* --------- tooltip titles honor timezone --------- */
-function tooltipTitle(ctx){
-  const d = new Date(ctx[0].parsed.x);
-  return useLocalTZ ? fmtLocal(d) : fmtUTC(d);
+/* Build datasets with nice styles (Chart.js will choose colors automatically; we keep theme minimal) */
+function ds(label, data, yAxisID, tension=0.25){
+  return { label, data, parsing:false, borderWidth:2, pointRadius:0, yAxisID, cubicInterpolationMode:'monotone', tension };
 }
 
-/* --------- temp threshold shading + tiny label --------- */
-const thresholdFillPlugin = {
-  id: 'thresholdFill',
-  beforeDraw(chart) {
-    const yS = chart.scales.y, area = chart.chartArea;
-    if (!yS || !area) return;
-    const y = yS.getPixelForValue(HOT_THRESHOLD);
-    const ctx = chart.ctx;
-    ctx.save(); ctx.globalAlpha=0.22; ctx.fillStyle='#ef4444';
-    ctx.fillRect(area.left,area.top,area.right-area.left,Math.max(0,y-area.top)); ctx.restore();
-    ctx.save(); ctx.strokeStyle='#ff6b6b'; ctx.lineWidth=1.25; ctx.setLineDash([6,4]);
-    ctx.beginPath(); ctx.moveTo(area.left,y); ctx.lineTo(area.right,y); ctx.stroke(); ctx.restore();
-    ctx.save(); ctx.font='12px system-ui,-apple-system,Segoe UI,Roboto,Arial'; ctx.fillStyle='#ffd7d7';
-    ctx.textAlign='right'; ctx.textBaseline='bottom'; ctx.fillText(`${HOT_THRESHOLD} °C`, area.right-6, y-4); ctx.restore();
-  }
-};
+/* Create or update charts */
+function renderCharts(){
+  // Prepare series
+  const T = filtered.map(r => ({x:new Date(r.ts), y:r.temp_c}));
+  const CPU = filtered.map(r => ({x:new Date(r.ts), y:r.cpu_percent}));
+  const RAM = filtered.map(r => ({x:new Date(r.ts), y:r.ram_percent}));
 
-/* --------- chart factory --------- */
-function makeChart(ctx, datasets, plugins=[]) {
-  return new Chart(ctx, {
-    type:'line',
-    data:{ datasets },
-    options:{
-      parsing:true, animation:false, normalized:true,
-      plugins:{
-        legend:{display:true, labels:{color:'#e2e8f0'}},
-        tooltip:{mode:'index', intersect:false, callbacks:{ title: tooltipTitle }}
+  const WAN = toRatesMbPerSec(filtered, 'wan_rx_bytes', 'wan_tx_bytes');
+  const WAN_RX = WAN.map(p => ({x:p.t, y:p.rx}));
+  const WAN_TX = WAN.map(p => ({x:p.t, y:p.tx}));
+
+  const LAN = toRatesMbPerSec(filtered, 'lan_rx_bytes', 'lan_tx_bytes');
+  const LAN_RX = LAN.map(p => ({x:p.t, y:p.rx}));
+  const LAN_TX = LAN.map(p => ({x:p.t, y:p.tx}));
+
+  // Temperature
+  charts.temp?.destroy();
+  charts.temp = new Chart(document.getElementById('tempChart'), {
+    type: 'line',
+    data: { datasets: [ ds('Temp °C', T, 'y') ] },
+    options: {
+      animation:false,
+      maintainAspectRatio:false,
+      scales:{
+        x: timeScaleOptions(),
+        y: { ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
       },
-      scales:{ x: xTimeScale(), y:{ ticks:{color:'#e2e8f0'}, grid:{color:'rgba(148,163,184,.2)'} } }
-    },
-    plugins
+      plugins:{ legend:{ labels:{ color:'#cbd5e1' } }, tooltip:{ mode:'index', intersect:false } }
+    }
+  });
+
+  // CPU & RAM
+  charts.cpu?.destroy();
+  charts.cpu = new Chart(document.getElementById('cpuRamChart'), {
+    type: 'line',
+    data: { datasets: [ ds('CPU %', CPU, 'y'), ds('RAM %', RAM, 'y') ] },
+    options: {
+      animation:false,
+      maintainAspectRatio:false,
+      scales:{
+        x: timeScaleOptions(),
+        y: { min:0, max:100, ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
+      },
+      plugins:{ legend:{ labels:{ color:'#cbd5e1' } }, tooltip:{ mode:'index', intersect:false } }
+    }
+  });
+
+  // WAN
+  charts.wan?.destroy();
+  charts.wan = new Chart(document.getElementById('wanChart'), {
+    type: 'line',
+    data: { datasets: [ ds('WAN Rx (Mb/s)', WAN_RX, 'y'), ds('WAN Tx (Mb/s)', WAN_TX, 'y') ] },
+    options: {
+      animation:false,
+      maintainAspectRatio:false,
+      scales:{
+        x: timeScaleOptions(),
+        y: { beginAtZero:true, ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
+      },
+      plugins:{ legend:{ labels:{ color:'#cbd5e1' } }, tooltip:{ mode:'index', intersect:false } }
+    }
+  });
+
+  // LAN
+  charts.lan?.destroy();
+  charts.lan = new Chart(document.getElementById('lanChart'), {
+    type: 'line',
+    data: { datasets: [ ds('LAN Rx (Mb/s)', LAN_RX, 'y'), ds('LAN Tx (Mb/s)', LAN_TX, 'y') ] },
+    options: {
+      animation:false,
+      maintainAspectRatio:false,
+      scales:{
+        x: timeScaleOptions(),
+        y: { beginAtZero:true, ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
+      },
+      plugins:{ legend:{ labels:{ color:'#cbd5e1' } }, tooltip:{ mode:'index', intersect:false } }
+    }
   });
 }
 
-/* ---------------- render ---------------- */
-function render(j){
-  const data = Array.isArray(j.data) ? j.data : [];
-  const last = data.length ? data[data.length-1] : null;
-  const host = last?.host ?? 'raspberrypi';
-  document.getElementById('host').textContent = host;
+/* Apply range filter based on UI */
+function applyRange(){
+  if(rawData.length===0){ filtered = []; return; }
 
-  // Summary
-  const curTemp = last ? Number(last.temp_c) : NaN;
-  const curEl = document.getElementById('cur');
-  curEl.textContent = isFinite(curTemp) ? curTemp.toFixed(1) : '—';
-  curEl.className = 'stat ' + (isFinite(curTemp) ? (curTemp>=HOT_THRESHOLD?'hot stat':'ok stat') : 'stat');
+  const preset = document.getElementById('presetSelect').value;
+  const startVal = document.getElementById('startInput').value;
+  const endVal = document.getElementById('endInput').value;
 
-  const upd = last ? new Date(last.ts) : null;
-  document.getElementById('tz-label').textContent = useLocalTZ ? 'Local' : 'UTC';
-  document.getElementById('upd').textContent = upd ? (useLocalTZ ? fmtLocal(upd) : fmtUTC(upd)) : '—';
+  let startMs = null, endMs = null;
+  if(endVal) endMs = new Date(endVal).getTime();
+  if(startVal) startMs = new Date(startVal).getTime();
 
-  // Bridge info
-  const wanIf = last?.wan_if ?? '—';
-  const lanIf = last?.lan_if ?? '—';
-  document.getElementById('wanBadge').textContent = 'wan: ' + wanIf;
-  document.getElementById('lanBadge').textContent = 'lan: ' + lanIf;
-  const bridge = !!last?.bridge_active;
-  const bt = document.getElementById('bridgeText');
-  bt.textContent = 'BRIDGE: ' + (bridge ? 'ACTIVE' : 'idle');
-  bt.className = 'bridgeText ' + (bridge ? 'active' : 'idle');
-
-  // Datasets
-  const ptsTemp   = toPoints(data, 'temp_c');
-  const ptsCPU    = toPoints(data, 'cpu_percent');
-  const ptsRAM    = toPoints(data, 'ram_percent');
-  const ptsUpMbps = toPoints(data, 'wan_tx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
-  const ptsDnMbps = toPoints(data, 'wan_rx_bps').map(p=>({x:p.x, y: mbpsFromBps(p.y)})).filter(p=>p.y!=null);
-
-  // Domains snapped to 10-min boundaries
-  const domTemp = computeDomain10m(ptsTemp, useLocalTZ);
-  const domCpu  = computeDomain10m(ptsCPU.length?ptsCPU:ptsRAM, useLocalTZ);
-  const baseNet = ptsUpMbps.length?ptsUpMbps:ptsDnMbps;
-  const domNet  = computeDomain10m(baseNet, useLocalTZ);
-
-  // Temperature
-  if(!charts.temp){
-    charts.temp = makeChart(document.getElementById('chartTemp').getContext('2d'), [
-      {label:'Temperature (°C)', data: ptsTemp, borderColor:'#60a5fa', pointRadius:0, tension:.2}
-    ], [thresholdFillPlugin]);
-    charts.temp.options.scales.y.suggestedMin = 20;
-    charts.temp.options.scales.y.suggestedMax = 80;
+  if(!startMs || !endMs){
+    // Presets if any of the custom fields are empty
+    const lastTs = new Date(rawData[rawData.length-1].ts).getTime();
+    const spans = { '12h':12*3600e3, '24h':24*3600e3, '48h':48*3600e3, '7d':7*24*3600e3 };
+    if(preset === 'all'){
+      startMs = new Date(rawData[0].ts).getTime();
+      endMs   = lastTs;
+    }else{
+      const span = spans[preset] ?? spans['48h'];
+      startMs = lastTs - span;
+      endMs   = lastTs;
+    }
   }
-  charts.temp.data.datasets[0].data = ptsTemp;
-  charts.temp.options.scales.x = xTimeScale(domTemp.min, domTemp.max);
-  charts.temp.update();
 
-  // CPU & RAM
-  if(!charts.cpu){
-    charts.cpu = makeChart(document.getElementById('chartCpuRam').getContext('2d'), [
-      {label:'CPU %', data: ptsCPU, borderColor:'#93c5fd', pointRadius:0, tension:.2},
-      {label:'RAM %', data: ptsRAM, borderColor:'#a78bfa', pointRadius:0, tension:.2}
-    ]);
-    charts.cpu.options.scales.y.suggestedMin = 0;
-    charts.cpu.options.scales.y.suggestedMax = 100;
-  }
-  charts.cpu.data.datasets[0].data = ptsCPU;
-  charts.cpu.data.datasets[1].data = ptsRAM;
-  charts.cpu.options.scales.x = xTimeScale(domCpu.min, domCpu.max);
-  charts.cpu.update();
+  filtered = rawData.filter(r => {
+    const t = new Date(r.ts).getTime();
+    return t >= startMs && t <= endMs;
+  });
 
-  // Network (WAN Mb/s)
-  if(!charts.net){
-    charts.net = makeChart(document.getElementById('chartNet').getContext('2d'), [
-      {label:'Upload (Mb/s)',   data: ptsUpMbps, borderColor:'#34d399', pointRadius:0, tension:.2},
-      {label:'Download (Mb/s)', data: ptsDnMbps, borderColor:'#f472b6', pointRadius:0, tension:.2}
-    ]);
+  if(filtered.length < 2){
+    // fall back to whole dataset if too small
+    filtered = [...rawData];
   }
-  charts.net.data.datasets[0].data = ptsUpMbps;
-  charts.net.data.datasets[1].data = ptsDnMbps;
-  charts.net.options.scales.x = xTimeScale(domNet.min, domNet.max);
-  charts.net.update();
 }
 
-/* ---------------- boot ---------------- */
+/* Fetch and parse NDJSON */
+async function fetchNdjson(){
+  const res = await fetch(NDJSON_URL, { cache:'no-store' });
+  if(!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+  const text = await res.text();
+  // tolerate blank lines
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length>0);
+  const rows = [];
+  for(const line of lines){
+    try{
+      const obj = JSON.parse(line);
+      rows.push(obj);
+    }catch(e){ /* ignore bad lines */ }
+  }
+  rows.sort(byTsAsc);
+  return rows;
+}
+
+/* Update summary */
+function updateSummary(){
+  const hostEl = document.getElementById('hostName');
+  const lastEl = document.getElementById('lastTs');
+  const badge  = document.getElementById('bridgeStatus');
+
+  if(rawData.length===0){
+    hostEl.textContent = '—';
+    lastEl.textContent = '—';
+    badge.textContent  = 'No data';
+    badge.className = 'chip warn';
+    return;
+  }
+  const last = rawData[rawData.length-1];
+  hostEl.textContent = last.host ?? '—';
+  lastEl.textContent = fmtLocal(last.ts);
+
+  const st = computeBridgeStatus(rawData);
+  badge.textContent = st.label;
+  badge.className = `chip ${st.cls}`;
+}
+
+/* Countdown label */
+function startRefreshCountdown(){
+  const el = document.getElementById('refreshStatus');
+  function tick(){
+    const sec = Math.max(0, Math.ceil((nextRefreshAt - Date.now())/1000));
+    const m = String(Math.floor(sec/60)).padStart(1,'0');
+    const s = String(sec%60).padStart(2,'0');
+    el.textContent = `Next auto-refresh in ${m}:${s}`;
+    if(sec<=0){ nextRefreshAt = Date.now()+REFRESH_MS; }
+    requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+/* Load + draw flow */
 async function loadAndRender(){
   try{
-    const raw = await fetchJsonNoCache(BLOB_URL);
-    const norm = normalizePayload(raw);
-    addDerivedNetRates(norm.data);
-    render(norm);
-  }catch(e){ console.error(e); }
+    rawData = await fetchNdjson();
+    updateSummary();
+    applyRange();
+    renderCharts();
+  }catch(err){
+    console.error(err);
+    alert("Failed to load telemetry. Check NDJSON_URL or network console.");
+  }
 }
-document.getElementById('tzToggle').addEventListener('change', e=>{ useLocalTZ = !useLocalTZ; loadAndRender(); });
-loadAndRender(); setInterval(loadAndRender, 60_000);
+
+/* Wire UI */
+document.getElementById('applyBtn').addEventListener('click', ()=>{
+  applyRange();
+  renderCharts();
+});
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  document.getElementById('presetSelect').value = '48h';
+  document.getElementById('startInput').value = '';
+  document.getElementById('endInput').value = '';
+  applyRange();
+  renderCharts();
+});
+document.getElementById('presetSelect').addEventListener('change', ()=>{
+  // Clear custom dates when preset is chosen
+  document.getElementById('startInput').value = '';
+  document.getElementById('endInput').value = '';
+});
+
+/* Boot */
+(async ()=>{
+  await loadAndRender();
+  startRefreshCountdown();
+  // Auto refresh every 10 minutes
+  setInterval(async ()=>{
+    await loadAndRender();
+  }, REFRESH_MS);
+})();
 </script>
 </body>
 </html>
