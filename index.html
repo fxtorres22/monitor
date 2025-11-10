@@ -37,13 +37,16 @@
     border-radius:10px;padding:8px 10px;font-size:.95rem;outline:none
   }
   button{cursor:pointer}
-  canvas{width:100%;height:340px}
   .hint{font-size:.85rem;color:var(--muted)}
   .row-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
   @media (max-width:900px){ .summary-row{grid-template-columns:1fr} .row-2{grid-template-columns:1fr} }
   .title{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
   .title h2{font-size:1.05rem;margin:0}
   .legend-note{font-size:.8rem;color:var(--muted)}
+
+  /* ✅ Stable chart sizing: fixed-height parent, canvas fills it */
+  .chart{height:340px; position:relative}
+  canvas{width:100% !important; height:100% !important; display:block}
 </style>
 </head>
 <body>
@@ -106,25 +109,25 @@
   <!-- 2) Temperature -->
   <div class="card">
     <div class="title"><h2>2) Temperature (°C)</h2></div>
-    <canvas id="tempChart"></canvas>
+    <div class="chart"><canvas id="tempChart"></canvas></div>
     <div class="hint">Grid every 10 minutes; labels show each full hour.</div>
   </div>
 
   <!-- 3) CPU & RAM -->
   <div class="card">
     <div class="title"><h2>3) CPU & RAM (%)</h2></div>
-    <canvas id="cpuRamChart"></canvas>
+    <div class="chart"><canvas id="cpuRamChart"></canvas></div>
   </div>
 
   <!-- 4 & 5) WAN / LAN throughput -->
   <div class="row-2">
     <div class="card">
       <div class="title"><h2>4) WAN Throughput (Rx/Tx, Mb/s)</h2></div>
-      <canvas id="wanChart"></canvas>
+      <div class="chart"><canvas id="wanChart"></canvas></div>
     </div>
     <div class="card">
       <div class="title"><h2>5) LAN Throughput (Rx/Tx, Mb/s)</h2></div>
-      <canvas id="lanChart"></canvas>
+      <div class="chart"><canvas id="lanChart"></canvas></div>
     </div>
   </div>
 
@@ -132,10 +135,14 @@
 
 <script>
 /* 🔗 SET YOUR NDJSON URL HERE */
-const NDJSON_URL = "https://storagetemperaturedata.blob.core.windows.net/raspberry-telemetry/telemetry.ndjson";
+const NDJSON_URL = "https://example.com/telemetry.ndjson";
 
 /* Auto-refresh period (ms) */
 const REFRESH_MS = 10 * 60 * 1000;
+
+/* Chart.js global defaults */
+Chart.defaults.responsive = true;
+Chart.defaults.maintainAspectRatio = false;
 
 /* State */
 let rawData = [];          // all rows from NDJSON (parsed objects)
@@ -146,26 +153,22 @@ let nextRefreshAt = Date.now() + REFRESH_MS;
 /* ---------- Utils ---------- */
 const fmtLocal = (d)=> new Date(d).toLocaleString();
 const byTsAsc = (a,b)=> new Date(a.ts) - new Date(b.ts);
-const clamp = (v,min,max)=> Math.min(Math.max(v,min),max);
 
 /* Convert cumulative bytes to Mb/s using deltas between consecutive points */
 function toRatesMbPerSec(rows, rxKey, txKey){
   const out = rows.map((r,i)=>{
     if(i===0){ return { t:new Date(r.ts), rx:null, tx:null }; }
     const dt = (new Date(rows[i].ts) - new Date(rows[i-1].ts)) / 1000; // seconds
-    const drx = Math.max(0, r[rxKey] - rows[i-1][rxKey]);
-    const dtx = Math.max(0, r[txKey] - rows[i-1][txKey]);
+    const drx = Math.max(0, (r[rxKey] ?? 0) - (rows[i-1][rxKey] ?? 0));
+    const dtx = Math.max(0, (r[txKey] ?? 0) - (rows[i-1][txKey] ?? 0));
     const rxbps = dt>0 ? (drx*8)/dt : 0;
     const txbps = dt>0 ? (dtx*8)/dt : 0;
-    return { t:new Date(r.ts), rx: r[rxKey]!=null ? rxbps/1e6 : null, tx: r[txKey]!=null ? txbps/1e6 : null };
+    return { t:new Date(r.ts), rx: rxbps/1e6, tx: txbps/1e6 };
   });
   return out;
 }
 
-/* Compute Bridge Status.
-   Idea: Over the last hour (or available), compare total WAN vs total LAN byte deltas.
-   If totals are tiny -> Idle. If reasonably large and within 20% -> Active. Else -> Idle.
-*/
+/* Compute Bridge Status (last hour). */
 function computeBridgeStatus(rows){
   if(rows.length < 2) return {label:"No data", cls:"warn"};
   const windowMs = 60*60*1000; // 1h
@@ -186,36 +189,36 @@ function computeBridgeStatus(rows){
 
   const diff = Math.abs(wan - lan);
   const rel = diff / Math.max(wan, lan, 1);
-  if(rel <= 0.2) return {label:"Active", cls:"ok"}; // close match (forwarding)
+  if(rel <= 0.2) return {label:"Active", cls:"ok"};
   return {label:"Idle", cls:"idle"};
 }
 
-/* Ticks: grid every 10 minutes, show labels only on the hour */
+/* X time scale: grid every 10 minutes; labels only on the hour */
 function timeScaleOptions(){
+  const gridColor = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim() || '#1b2947';
   return {
     type: 'time',
-    adapters: { date: {} },
     time: { unit: 'minute', stepSize: 10 },
     ticks: {
       autoSkip: false,
-      callback: (val, idx, ticks) => {
-        const v = ticks[idx].value; // ms
-        const m = new Date(v).getMinutes();
-        return m === 0 ? new Date(v).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
-      }
+      callback: (value) => {
+        const d = new Date(value);
+        return d.getMinutes() === 0
+          ? d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})
+          : '';
+      },
+      color:'#cbd5e1'
     },
-    grid: { color: (ctx)=> ctx.tick && ctx.tick.major ? undefined : getComputedStyle(document.documentElement).getPropertyValue('--grid') }
+    grid: { color: gridColor }
   };
 }
 
-/* Build datasets with nice styles (Chart.js will choose colors automatically; we keep theme minimal) */
 function ds(label, data, yAxisID, tension=0.25){
-  return { label, data, parsing:false, borderWidth:2, pointRadius:0, yAxisID, cubicInterpolationMode:'monotone', tension };
+  return { label, data, parsing:false, spanGaps:true, borderWidth:2, pointRadius:0, yAxisID, cubicInterpolationMode:'monotone', tension };
 }
 
-/* Create or update charts */
+/* Create/update charts */
 function renderCharts(){
-  // Prepare series
   const T = filtered.map(r => ({x:new Date(r.ts), y:r.temp_c}));
   const CPU = filtered.map(r => ({x:new Date(r.ts), y:r.cpu_percent}));
   const RAM = filtered.map(r => ({x:new Date(r.ts), y:r.ram_percent}));
@@ -228,14 +231,12 @@ function renderCharts(){
   const LAN_RX = LAN.map(p => ({x:p.t, y:p.rx}));
   const LAN_TX = LAN.map(p => ({x:p.t, y:p.tx}));
 
-  // Temperature
   charts.temp?.destroy();
   charts.temp = new Chart(document.getElementById('tempChart'), {
     type: 'line',
     data: { datasets: [ ds('Temp °C', T, 'y') ] },
     options: {
       animation:false,
-      maintainAspectRatio:false,
       scales:{
         x: timeScaleOptions(),
         y: { ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
@@ -244,14 +245,12 @@ function renderCharts(){
     }
   });
 
-  // CPU & RAM
   charts.cpu?.destroy();
   charts.cpu = new Chart(document.getElementById('cpuRamChart'), {
     type: 'line',
     data: { datasets: [ ds('CPU %', CPU, 'y'), ds('RAM %', RAM, 'y') ] },
     options: {
       animation:false,
-      maintainAspectRatio:false,
       scales:{
         x: timeScaleOptions(),
         y: { min:0, max:100, ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
@@ -260,14 +259,12 @@ function renderCharts(){
     }
   });
 
-  // WAN
   charts.wan?.destroy();
   charts.wan = new Chart(document.getElementById('wanChart'), {
     type: 'line',
     data: { datasets: [ ds('WAN Rx (Mb/s)', WAN_RX, 'y'), ds('WAN Tx (Mb/s)', WAN_TX, 'y') ] },
     options: {
       animation:false,
-      maintainAspectRatio:false,
       scales:{
         x: timeScaleOptions(),
         y: { beginAtZero:true, ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
@@ -276,14 +273,12 @@ function renderCharts(){
     }
   });
 
-  // LAN
   charts.lan?.destroy();
   charts.lan = new Chart(document.getElementById('lanChart'), {
     type: 'line',
     data: { datasets: [ ds('LAN Rx (Mb/s)', LAN_RX, 'y'), ds('LAN Tx (Mb/s)', LAN_TX, 'y') ] },
     options: {
       animation:false,
-      maintainAspectRatio:false,
       scales:{
         x: timeScaleOptions(),
         y: { beginAtZero:true, ticks:{ color:'#cbd5e1' }, grid:{ color:'#1f2a44' } }
@@ -293,7 +288,7 @@ function renderCharts(){
   });
 }
 
-/* Apply range filter based on UI */
+/* Apply range filter */
 function applyRange(){
   if(rawData.length===0){ filtered = []; return; }
 
@@ -301,21 +296,21 @@ function applyRange(){
   const startVal = document.getElementById('startInput').value;
   const endVal = document.getElementById('endInput').value;
 
-  let startMs = null, endMs = null;
+  let startMs, endMs;
   if(endVal) endMs = new Date(endVal).getTime();
   if(startVal) startMs = new Date(startVal).getTime();
 
+  const lastTs = new Date(rawData[rawData.length-1].ts).getTime();
+  const spans = { '12h':12*3600e3, '24h':24*3600e3, '48h':48*3600e3, '7d':7*24*3600e3 };
+
   if(!startMs || !endMs){
-    // Presets if any of the custom fields are empty
-    const lastTs = new Date(rawData[rawData.length-1].ts).getTime();
-    const spans = { '12h':12*3600e3, '24h':24*3600e3, '48h':48*3600e3, '7d':7*24*3600e3 };
     if(preset === 'all'){
       startMs = new Date(rawData[0].ts).getTime();
-      endMs   = lastTs;
+      endMs = lastTs;
     }else{
       const span = spans[preset] ?? spans['48h'];
       startMs = lastTs - span;
-      endMs   = lastTs;
+      endMs = lastTs;
     }
   }
 
@@ -325,7 +320,6 @@ function applyRange(){
   });
 
   if(filtered.length < 2){
-    // fall back to whole dataset if too small
     filtered = [...rawData];
   }
 }
@@ -335,13 +329,12 @@ async function fetchNdjson(){
   const res = await fetch(NDJSON_URL, { cache:'no-store' });
   if(!res.ok) throw new Error(`Fetch failed: ${res.status}`);
   const text = await res.text();
-  // tolerate blank lines
   const lines = text.split(/\r?\n/).filter(l => l.trim().length>0);
   const rows = [];
   for(const line of lines){
     try{
       const obj = JSON.parse(line);
-      rows.push(obj);
+      if(obj && obj.ts) rows.push(obj);
     }catch(e){ /* ignore bad lines */ }
   }
   rows.sort(byTsAsc);
@@ -386,15 +379,10 @@ function startRefreshCountdown(){
 
 /* Load + draw flow */
 async function loadAndRender(){
-  try{
-    rawData = await fetchNdjson();
-    updateSummary();
-    applyRange();
-    renderCharts();
-  }catch(err){
-    console.error(err);
-    alert("Failed to load telemetry. Check NDJSON_URL or network console.");
-  }
+  rawData = await fetchNdjson();
+  updateSummary();
+  applyRange();
+  renderCharts();
 }
 
 /* Wire UI */
@@ -410,18 +398,21 @@ document.getElementById('resetBtn').addEventListener('click', ()=>{
   renderCharts();
 });
 document.getElementById('presetSelect').addEventListener('change', ()=>{
-  // Clear custom dates when preset is chosen
   document.getElementById('startInput').value = '';
   document.getElementById('endInput').value = '';
 });
 
 /* Boot */
 (async ()=>{
-  await loadAndRender();
-  startRefreshCountdown();
-  // Auto refresh every 10 minutes
-  setInterval(async ()=>{
+  try{
     await loadAndRender();
+  }catch(err){
+    console.error(err);
+    alert("Failed to load telemetry. Check NDJSON_URL or network console.");
+  }
+  startRefreshCountdown();
+  setInterval(async ()=>{
+    try{ await loadAndRender(); }catch(e){ console.error(e); }
   }, REFRESH_MS);
 })();
 </script>
