@@ -44,7 +44,7 @@
   .title h2{font-size:1.05rem;margin:0}
   .legend-note{font-size:.8rem;color:var(--muted)}
 
-  /* ✅ Stable chart sizing: fixed-height parent, canvas fills it */
+  /* Stable chart sizing: fixed-height parent, canvas fills it */
   .chart{height:340px; position:relative}
   canvas{width:100% !important; height:100% !important; display:block}
 </style>
@@ -134,7 +134,7 @@
 </div>
 
 <script>
-/* 🔗 SET YOUR NDJSON URL HERE */
+/* 🔗 Your NDJSON URL */
 const NDJSON_URL = "https://storagetemperaturedata.blob.core.windows.net/raspberry-telemetry/telemetry.ndjson";
 
 /* Auto-refresh period (ms) */
@@ -324,9 +324,9 @@ function applyRange(){
   }
 }
 
-/* Fetch and parse NDJSON */
+/* Fetch and parse NDJSON (with cache-buster) */
 async function fetchNdjson(){
-  const res = await fetch(NDJSON_URL, { cache:'no-store' });
+  const res = await fetch(NDJSON_URL + "?t=" + Date.now(), { cache:'no-store' });
   if(!res.ok) throw new Error(`Fetch failed: ${res.status}`);
   const text = await res.text();
   const lines = text.split(/\r?\n/).filter(l => l.trim().length>0);
@@ -408,7 +408,7 @@ document.getElementById('presetSelect').addEventListener('change', ()=>{
     await loadAndRender();
   }catch(err){
     console.error(err);
-    alert("Failed to load telemetry. Check NDJSON_URL or network console.");
+    alert("Failed to load telemetry. Check NDJSON_URL, CORS on your blob, or network console.");
   }
   startRefreshCountdown();
   setInterval(async ()=>{
