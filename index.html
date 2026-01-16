@@ -140,6 +140,12 @@ const NDJSON_URL = "https://storagetemperaturedata.blob.core.windows.net/raspber
 /* Auto-refresh period (ms) */
 const REFRESH_MS = 10 * 60 * 1000;
 
+/* Tail Size: How many bytes to fetch for the default view? (approx 2MB) */
+const TAIL_BYTES = 2 * 1024 * 1024; 
+
+/* Chart Decimation: Maximum points to render per chart to prevent lag */
+const MAX_POINTS = 1000;
+
 /* Chart.js global defaults */
 Chart.defaults.responsive = true;
 Chart.defaults.maintainAspectRatio = false;
@@ -153,6 +159,13 @@ let nextRefreshAt = Date.now() + REFRESH_MS;
 /* ---------- Utils ---------- */
 const fmtLocal = (d)=> new Date(d).toLocaleString();
 const byTsAsc = (a,b)=> new Date(a.ts) - new Date(b.ts);
+
+/* Solution 2: Decimate Data (Downsampling) */
+function decimate(data, maxCount = MAX_POINTS) {
+  if (!data || data.length <= maxCount) return data;
+  const step = Math.ceil(data.length / maxCount);
+  return data.filter((_, i) => i % step === 0);
+}
 
 /* Convert cumulative bytes to Mb/s using deltas between consecutive points */
 function toRatesMbPerSec(rows, rxKey, txKey){
@@ -193,7 +206,7 @@ function computeBridgeStatus(rows){
   return {label:"Idle", cls:"idle"};
 }
 
-/* X time scale: grid every 10 minutes; labels only on the hour */
+/* X time scale: grid every 10 minutes */
 function timeScaleOptions(){
   const gridColor = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim() || '#1b2947';
   return {
@@ -221,7 +234,7 @@ function ds(label, data, yAxisID, tension=0.25){
 
 /* Create/update charts */
 function renderCharts(){
-  // Use numeric timestamps (ms) and filter out invalid points
+  // 1. Prepare Data
   const T = filtered.map(r => ({x: Date.parse(r.ts), y: Number(r.temp_c)})).filter(p => Number.isFinite(p.y));
   const CPU = filtered.map(r => ({x: Date.parse(r.ts), y: Number(r.cpu_percent)})).filter(p => Number.isFinite(p.y));
   const RAM = filtered.map(r => ({x: Date.parse(r.ts), y: Number(r.ram_percent)})).filter(p => Number.isFinite(p.y));
@@ -234,7 +247,17 @@ function renderCharts(){
   const LAN_RX = LAN.map(p => ({x: Number(p.t), y: Number(p.rx)})).filter(p => Number.isFinite(p.y));
   const LAN_TX = LAN.map(p => ({x: Number(p.t), y: Number(p.tx)})).filter(p => Number.isFinite(p.y));
 
-  // helper to make a visible dataset on dark bg
+  // 2. Decimate Data (Solution 2)
+  // We only draw 1000 points max per chart to keep it snappy
+  const T_d = decimate(T);
+  const CPU_d = decimate(CPU);
+  const RAM_d = decimate(RAM);
+  const W_RX_d = decimate(WAN_RX);
+  const W_TX_d = decimate(WAN_TX);
+  const L_RX_d = decimate(LAN_RX);
+  const L_TX_d = decimate(LAN_TX);
+
+  // Helper for datasets
   const mk = (label, data, color) => ({
     label, data, parsing:false, spanGaps:true, borderWidth:2, pointRadius:0,
     borderColor: color, cubicInterpolationMode:'monotone', tension:0.25
@@ -243,7 +266,7 @@ function renderCharts(){
   charts.temp?.destroy();
   charts.temp = new Chart(document.getElementById('tempChart'), {
     type: 'line',
-    data: { datasets: [ mk('Temp °C', T, '#60a5fa') ] },
+    data: { datasets: [ mk('Temp °C', T_d, '#60a5fa') ] },
     options: {
       animation:false, maintainAspectRatio:false,
       scales:{ x: timeScaleOptions(), y:{ ticks:{color:'#cbd5e1'}, grid:{color:'#1f2a44'} } },
@@ -254,7 +277,7 @@ function renderCharts(){
   charts.cpu?.destroy();
   charts.cpu = new Chart(document.getElementById('cpuRamChart'), {
     type: 'line',
-    data: { datasets: [ mk('CPU %', CPU, '#34d399'), mk('RAM %', RAM, '#f472b6') ] },
+    data: { datasets: [ mk('CPU %', CPU_d, '#34d399'), mk('RAM %', RAM_d, '#f472b6') ] },
     options: {
       animation:false, maintainAspectRatio:false,
       scales:{ x: timeScaleOptions(), y:{ min:0, max:100, ticks:{color:'#cbd5e1'}, grid:{color:'#1f2a44'} } },
@@ -265,7 +288,7 @@ function renderCharts(){
   charts.wan?.destroy();
   charts.wan = new Chart(document.getElementById('wanChart'), {
     type: 'line',
-    data: { datasets: [ mk('WAN Rx (Mb/s)', WAN_RX, '#f59e0b'), mk('WAN Tx (Mb/s)', WAN_TX, '#ef4444') ] },
+    data: { datasets: [ mk('WAN Rx (Mb/s)', W_RX_d, '#f59e0b'), mk('WAN Tx (Mb/s)', W_TX_d, '#ef4444') ] },
     options: {
       animation:false, maintainAspectRatio:false,
       scales:{ x: timeScaleOptions(), y:{ beginAtZero:true, ticks:{color:'#cbd5e1'}, grid:{color:'#1f2a44'} } },
@@ -276,7 +299,7 @@ function renderCharts(){
   charts.lan?.destroy();
   charts.lan = new Chart(document.getElementById('lanChart'), {
     type: 'line',
-    data: { datasets: [ mk('LAN Rx (Mb/s)', LAN_RX, '#22c55e'), mk('LAN Tx (Mb/s)', LAN_TX, '#60a5fa') ] },
+    data: { datasets: [ mk('LAN Rx (Mb/s)', L_RX_d, '#22c55e'), mk('LAN Tx (Mb/s)', L_TX_d, '#60a5fa') ] },
     options: {
       animation:false, maintainAspectRatio:false,
       scales:{ x: timeScaleOptions(), y:{ beginAtZero:true, ticks:{color:'#cbd5e1'}, grid:{color:'#1f2a44'} } },
@@ -303,9 +326,9 @@ function applyRange(){
 
   if(!startMs || !endMs){
     if(preset === 'all'){
-      startMs = new Date(rawData[0].ts).getTime();
+      startMs = new Date(rawData[0].ts).getTime(); // oldest point we have
       endMs = lastTs;
-    }else{
+    } else {
       const span = spans[preset] ?? spans['48h'];
       startMs = lastTs - span;
       endMs = lastTs;
@@ -317,23 +340,54 @@ function applyRange(){
     return t >= startMs && t <= endMs;
   });
 
-  if(filtered.length < 2){
-    filtered = [...rawData];
+  if(filtered.length === 0 && rawData.length > 0) {
+     // fallback if range is empty
+     filtered = [rawData[rawData.length-1]];
   }
 }
 
-/* Fetch and parse NDJSON (with cache-buster) */
-async function fetchNdjson(){
-  const res = await fetch(NDJSON_URL + "?t=" + Date.now(), { cache:'no-store' });
+/* Solution 1: Intelligent Fetch (Tail vs Full) */
+async function fetchNdjson(forceFull = false) {
+  const ts = Date.now();
+  
+  // 1. Check size
+  const headReq = await fetch(NDJSON_URL + "?t=" + ts, { method:'HEAD', cache:'no-store' });
+  if(!headReq.ok) throw new Error(`HEAD failed: ${headReq.status}`);
+  
+  const totalBytes = Number(headReq.headers.get('content-length'));
+  if(!totalBytes) console.warn("Could not get content-length. Azure CORS exposed headers?");
+
+  let headers = {};
+  let isPartial = false;
+
+  // If not forced to full history, and file is larger than tail size, use Range
+  if(!forceFull && totalBytes > TAIL_BYTES) {
+    const startByte = totalBytes - TAIL_BYTES;
+    headers = { 'Range': `bytes=${startByte}-` };
+    isPartial = true;
+    console.log(`Fetching tail: last ${(TAIL_BYTES/1024/1024).toFixed(1)} MB`);
+  } else {
+    console.log("Fetching full history");
+  }
+
+  // 2. Fetch content
+  const res = await fetch(NDJSON_URL + "?t=" + ts, { headers, cache:'no-store' });
   if(!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+  
   const text = await res.text();
-  const lines = text.split(/\r?\n/).filter(l => l.trim().length>0);
+  const lines = text.split(/\r?\n/);
+  
   const rows = [];
-  for(const line of lines){
+  // If partial, skip the first line as it is likely incomplete/broken json
+  const startIdx = isPartial ? 1 : 0; 
+  
+  for(let i=startIdx; i<lines.length; i++){
+    const line = lines[i].trim();
+    if(line.length===0) continue;
     try{
       const obj = JSON.parse(line);
       if(obj && obj.ts) rows.push(obj);
-    }catch(e){ /* ignore bad lines */ }
+    }catch(e){ /* ignore broken lines */ }
   }
   rows.sort(byTsAsc);
   return rows;
@@ -375,12 +429,24 @@ function startRefreshCountdown(){
   tick();
 }
 
-/* Load + draw flow */
-async function loadAndRender(){
-  rawData = await fetchNdjson();
-  updateSummary();
-  applyRange();
-  renderCharts();
+/* Logic: Load Data -> Draw */
+async function loadAndRender(forceFull = false){
+  try {
+    const btn = document.getElementById('applyBtn');
+    const originalText = btn.textContent;
+    btn.textContent = "Loading...";
+    
+    rawData = await fetchNdjson(forceFull);
+    
+    updateSummary();
+    applyRange();
+    renderCharts();
+    
+    btn.textContent = originalText;
+  } catch(err) {
+    console.error(err);
+    alert("Load failed. See console.\nNote: Check Azure CORS for 'Range' header support.");
+  }
 }
 
 /* Wire UI */
@@ -388,29 +454,41 @@ document.getElementById('applyBtn').addEventListener('click', ()=>{
   applyRange();
   renderCharts();
 });
-document.getElementById('resetBtn').addEventListener('click', ()=>{
+
+document.getElementById('resetBtn').addEventListener('click', async ()=>{
   document.getElementById('presetSelect').value = '48h';
   document.getElementById('startInput').value = '';
   document.getElementById('endInput').value = '';
-  applyRange();
-  renderCharts();
+  // Reset usually implies going back to default view (tail only is fine)
+  await loadAndRender(false); 
 });
-document.getElementById('presetSelect').addEventListener('change', ()=>{
+
+// Detect when user asks for "All" or "7d" which might require full history
+document.getElementById('presetSelect').addEventListener('change', async (e)=>{
   document.getElementById('startInput').value = '';
   document.getElementById('endInput').value = '';
+  
+  const val = e.target.value;
+  // If user wants 7d or All, we might not have it in the tail. Force full download.
+  if(val === 'all' || val === '7d') {
+    await loadAndRender(true); // force full
+  } else {
+    // If we go back to small range, we can stick with what we have OR reload tail.
+    // Reloading tail is safer to clear memory if the user had just loaded a huge "All" dataset.
+    await loadAndRender(false);
+  }
 });
 
 /* Boot */
 (async ()=>{
-  try{
-    await loadAndRender();
-  }catch(err){
-    console.error(err);
-    alert("Failed to load telemetry. Check NDJSON_URL, CORS on your blob, or network console.");
-  }
+  await loadAndRender(false); // Default: load tail only
   startRefreshCountdown();
+  
+  // Auto-refresh loop
   setInterval(async ()=>{
-    try{ await loadAndRender(); }catch(e){ console.error(e); }
+    const preset = document.getElementById('presetSelect').value;
+    const isBig = (preset === 'all' || preset === '7d');
+    await loadAndRender(isBig);
   }, REFRESH_MS);
 })();
 </script>
